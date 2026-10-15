@@ -136,6 +136,17 @@ function installDisclosure(container: HTMLElement) {
     "data-focus-key": trigger.dataset.focusKey, "data-i18n": trigger.dataset.i18n,
     "aria-label": trigger.getAttribute("aria-label") || undefined, "data-i18n-aria": trigger.dataset.i18nAria };
   const triggerRef = slot([...trigger.childNodes].map(node => node.cloneNode(true)));
+  // Give the title space in priority order before truncating its text.
+  const headingSize = container.matches('.history-row') ? new ResizeObserver(() => {
+    const heading = container.querySelector<HTMLElement>('.disclosure-trigger');
+    const title = heading?.querySelector<HTMLElement>('.history-title-text');
+    if (!heading?.getBoundingClientRect().width || !title) return;
+    container.removeAttribute('data-hide-time'); container.removeAttribute('data-hide-exploration');
+    if (title.scrollWidth > title.clientWidth + 1) container.dataset.hideTime = '';
+    if (title.scrollWidth > title.clientWidth + 1) container.dataset.hideExploration = '';
+    const node = heading.querySelector<HTMLElement>('.progress-node')!;
+    container.style.setProperty('--cycle-node-center', `${node.getBoundingClientRect().top + node.offsetHeight / 2 - container.getBoundingClientRect().top}px`);
+  }) : null;
   const contentNodes = [...container.childNodes].filter(node => node !== trigger);
   let panel: HTMLDivElement | null = null;
   const contentRef = (node: HTMLDivElement | null) => {
@@ -168,7 +179,8 @@ function installDisclosure(container: HTMLElement) {
   const update = island(container, () => <Collapsible open={open} onOpenChange={change}>
     <CollapsibleTrigger asChild><Button {...triggerProps} type="button" variant="ghost" ref={triggerRef} /></CollapsibleTrigger>
     <CollapsibleContent forceMount ref={contentRef} />
-  </Collapsible>);
+  </Collapsible>, () => headingSize?.disconnect());
+  headingSize?.observe(container);
   Object.defineProperty(container, "open", { configurable: true, get: () => open, set: change });
   container.toggleAttribute("open", open);
 }

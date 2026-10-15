@@ -546,10 +546,15 @@ window.DashboardNavigation.register('journal', (view) => {
     number.append(numberValue);
     const title = element('span', 'history-title');
     const titleText = element('span', 'history-title-text', cycleTitle(cycle));
+    titleText.title = cycleTitle(cycle);
     titleText.setAttribute('role', 'heading'); titleText.setAttribute('aria-level', '2');
     if (current) titleText.id = 'cycleTitle';
     title.append(titleText);
-    if (association) title.append(element('span', 'cycle-association', association));
+    if (association) {
+      const badge = element('span', 'cycle-association', association);
+      if (cycle.identityKind === 'exploration') badge.dataset.exploration = '';
+      title.append(badge);
+    }
     const timing = element('time', `history-meta${cycle.status === 'failed' ? ' status-failed' : ''}`, formatTime(cycle.endedAt || cycle.startedAt || cycle.reservedAt, true));
     timing.title = statusLabel(cycle.status);
     if (cycle.endedAt || cycle.startedAt || cycle.reservedAt) timing.dateTime = cycle.endedAt || cycle.startedAt || cycle.reservedAt;
@@ -1045,7 +1050,8 @@ window.DashboardNavigation.register('journal', (view) => {
     document.querySelector('.tabs').setAttribute('aria-label', message('work'));
     document.querySelector('.table-scroll').setAttribute('aria-label', message('usageDetail'));
     $('projectSidebar').setAttribute('aria-label', message('productInfo'));
-    $('productInfoJump').hidden = state.tab !== 'work';
+    $('projectInfoButton').setAttribute('aria-label', message('productInfo'));
+    $('projectInfoButton').title = message('productInfo');
     window.DashboardIcons.hydrate(view.root);
   }
   function rememberFocus() {
@@ -1323,7 +1329,6 @@ window.DashboardNavigation.register('journal', (view) => {
     }
     if (changed) { UI.reveal($(`panel-${tab}`)); window.scrollTo({ top: tabScroll.get(tab) || 0, behavior: 'instant' }); }
     if (focus) $(`tab-${tab}`).focus();
-    $('productInfoJump').hidden = tab !== 'work';
   }
   function connectionNotice(key) {
     const node = clear($('connectionError'));
@@ -1506,6 +1511,58 @@ window.DashboardNavigation.register('journal', (view) => {
     } catch (_) { if (view.active) $('logStatus').textContent = message('copyFailed'); }
   });
   $('settingsButton').addEventListener('click', () => { $('settingsDialog').showModal(); refreshLanguage(); });
+  const compactSidebar = matchMedia('(max-width: 1080px)');
+  function placeProjectSidebar(animated = true) {
+    if (!compactSidebar.matches) $('projectInfoDrawer').close(true);
+    UI.dockSidebar(compactSidebar.matches, animated && view.active);
+  }
+  view.listen(compactSidebar, 'change', () => placeProjectSidebar());
+  const overviewTab = $('projectInfoButton');
+  let overviewPosition = null;
+  let overviewDrag = null;
+  let suppressOverviewClick = false;
+  function moveOverview(top) {
+    const minimum = Math.max(12, document.querySelector('.topbar').getBoundingClientRect().bottom + 12);
+    overviewPosition = Math.max(Math.min(minimum, innerHeight - 100), Math.min(top, innerHeight - 100));
+    overviewTab.style.top = `${overviewPosition}px`;
+  }
+  view.listen(overviewTab, 'pointerdown', (event) => {
+    if (!event.isPrimary || event.button !== 0) return;
+    suppressOverviewClick = false;
+    overviewDrag = { id: event.pointerId, y: event.clientY, top: overviewTab.getBoundingClientRect().top, moved: false };
+    overviewTab.setPointerCapture(event.pointerId);
+  });
+  view.listen(overviewTab, 'pointermove', (event) => {
+    if (!overviewDrag || overviewDrag.id !== event.pointerId) return;
+    const delta = event.clientY - overviewDrag.y;
+    if (!overviewDrag.moved && Math.abs(delta) < 5) return;
+    overviewDrag.moved = true; overviewTab.dataset.dragging = '';
+    moveOverview(overviewDrag.top + delta);
+  });
+  const finishOverviewDrag = (event) => {
+    if (!overviewDrag || overviewDrag.id !== event.pointerId) return;
+    suppressOverviewClick = overviewDrag.moved;
+    overviewDrag = null; delete overviewTab.dataset.dragging;
+    if (overviewTab.hasPointerCapture(event.pointerId)) overviewTab.releasePointerCapture(event.pointerId);
+  };
+  view.listen(overviewTab, 'pointerup', finishOverviewDrag);
+  view.listen(overviewTab, 'pointercancel', finishOverviewDrag);
+  view.listen(overviewTab, 'lostpointercapture', finishOverviewDrag);
+  view.listen(overviewTab, 'keydown', (event) => {
+    if (!['ArrowUp', 'ArrowDown', 'Home'].includes(event.key)) return;
+    event.preventDefault();
+    if (event.key === 'Home') { overviewPosition = null; overviewTab.style.removeProperty('top'); }
+    else moveOverview(overviewTab.getBoundingClientRect().top + (event.key === 'ArrowUp' ? -32 : 32));
+  });
+  view.listen(window, 'resize', () => { if (overviewPosition !== null && view.active) moveOverview(overviewPosition); });
+  overviewTab.addEventListener('click', (event) => {
+    if (event.detail && suppressOverviewClick) { suppressOverviewClick = false; return; }
+    placeProjectSidebar(false);
+    $('projectInfoDrawer').showModal();
+    $('projectInfoButton').setAttribute('aria-expanded', 'true');
+  });
+  $('projectInfoDrawer').addEventListener('close', () => $('projectInfoButton').setAttribute('aria-expanded', 'false'));
+  placeProjectSidebar(false);
   $('productSwitcherButton').addEventListener('click', openProductSwitcher);
   $('closeProductSwitcherButton').addEventListener('click', () => $('productSwitcherDialog').close());
 
@@ -1517,7 +1574,6 @@ window.DashboardNavigation.register('journal', (view) => {
     const box = $('settingsDialog').getBoundingClientRect();
     if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) $('settingsDialog').close();
   });
-  $('productInfoJump').addEventListener('click', () => $('projectSidebar').focus({ preventScroll: true }));
   view.listen(window, 'pagehide', saveJournalView);
   restoreJournalView();
   applyLanguage();

@@ -128,7 +128,7 @@ const test = base.extend({
   },
 });
 
-test('spec compliance: manual tabs, mobile product anchor and journal return state', async ({ page, journal }) => {
+test('spec compliance: manual tabs, compact mobile navigation and journal return state', async ({ page, journal }) => {
   await page.goto(`${journal.url}/journal`);
   await expect(page.locator('#cycleNumber')).toHaveText('03');
   await page.locator('#tab-work').focus();
@@ -143,9 +143,37 @@ test('spec compliance: manual tabs, mobile product anchor and journal return sta
   await page.reload();
   await expect(page.locator('#historyList [data-disclosure]').first()).toHaveAttribute('open', '');
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.locator('#productInfoJump').click();
-  await expect(page.locator('#projectSidebar')).toBeFocused();
-  await expect(page.locator('#projectName')).toBeInViewport();
+  await expect(page.locator('#productInfoJump')).toHaveCount(0);
+  const back = await page.locator('#journalBackLink').boundingBox();
+  const tabs = await page.locator('.topbar .ac-tabs-host').boundingBox();
+  expect(back.y + back.height / 2).toBeCloseTo(tabs.y + tabs.height / 2, 1);
+});
+
+test('compact product information overlays the journal and restores the desktop sidebar', async ({ page, journal }) => {
+  await page.setViewportSize({ width: 1000, height: 800 });
+  await page.goto(`${journal.url}/journal`);
+  await expect(page.locator('#cycleNumber')).toHaveText('03');
+  await expect(page.locator('#projectSidebar')).toBeHidden();
+  const timeline = page.locator('.current-column');
+  const before = await timeline.boundingBox();
+  await page.locator('#projectInfoButton').click();
+  await expect(page.locator('[role=dialog] #projectSidebar')).toBeVisible();
+  const opened = await timeline.boundingBox();
+  expect(opened.x).toBeCloseTo(before.x, 1);
+  expect(Math.abs(opened.width - before.width)).toBeLessThan(1);
+  await page.locator('[role=dialog]').press('Escape');
+  await expect(page.locator('#projectInfoButton')).toBeFocused();
+  await expect(page.locator('#projectSidebar')).toBeHidden();
+  await page.locator('#projectInfoButton').click();
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await expect(page.locator('[role=dialog]')).toHaveCount(0);
+  await expect(page.locator('#projectSidebarHome #projectSidebar')).toBeVisible();
+  await expect(page.locator('#projectInfoButton')).toBeHidden();
+  for (const width of [761, 760, 641, 640, 390]) {
+    await page.setViewportSize({ width, height: 800 });
+    const inset = await page.locator('.topbar').evaluate(node => node.querySelector('.brand').getBoundingClientRect().top - node.getBoundingClientRect().top);
+    expect(inset).toBeCloseTo(12, 1);
+  }
 });
 
 test('spec compliance: disconnected logs preserve reading position, copy and source time', async ({ page, journal }) => {

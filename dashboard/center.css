@@ -330,7 +330,7 @@ legend { padding: 0 6px; font-weight: 600; }
 .profile-avatar { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: #e6eaf4; color: #6c7c9e; }
 .center-main { width: calc(100% - 36px); max-width: 1440px; padding: 0 0 24px; }
 [hidden] { display: none !important; }
-.center-toolbar { display: flex; align-items: center; gap: 20px; min-height: 80px; padding: 12px 0 10px; margin: 0 0 12px; border-bottom: 1px solid var(--line); }
+.center-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px; min-height: 80px; padding: 12px 0 10px; margin: 0 0 12px; border-bottom: 1px solid var(--line); }
 .catalog-tools { display: flex; flex: 1 1 auto; min-width: 0; align-items: center; gap: 14px; padding: 0; }
 .search-field { flex: 0 1 208px; min-width: 125px; height: 35px; padding: 0 11px; gap: 9px; border-color: var(--line-strong); background: #f8f9fc; border-radius: 4px; font-size: var(--text-caption); }
 .search-field svg { width: 15px; flex-shrink: 0; }
@@ -398,19 +398,10 @@ legend { padding: 0 6px; font-weight: 600; }
 .catalog-footer .observed-at { font-size: var(--text-caption); }
 @media (min-width: 1450px) { .center-layout { grid-template-columns: minmax(0, 1fr) 260px; } }
 @media (max-width: 1000px) {
-  .center-toolbar { flex-wrap: wrap; gap: 10px; }
-  .catalog-tools { flex-basis: 100%; padding-top: 0; }
-  .toolbar-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; width: 100%; }
   .capacity-summary { margin: 0; }
   .center-layout { grid-template-columns: minmax(0, 1fr); }
   .queue-sidebar { border-left: 0; border-top: 1px solid var(--line); padding: 15px 0 0; }
   #queueSidebarContent { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-}
-@media (min-width: 641px) and (max-width: 1200px) {
-  .center-toolbar { flex-wrap: wrap; gap: 10px; }
-  .catalog-tools { flex-basis: 100%; flex-wrap: wrap; }
-  .filter-summary-row { flex: 0 1 auto; flex-wrap: wrap; max-width: 100%; }
-  .filters { flex-wrap: wrap; max-width: 100%; overflow: visible; }
 }
 @media (max-width: 640px) {
   .header-inner { gap: 18px; }
@@ -418,7 +409,8 @@ legend { padding: 0 6px; font-weight: 600; }
   .header-button { width: auto; overflow: visible; }
   .header-button span { position: static; width: auto; clip: auto; }
   .profile-button { gap: 5px; }.profile-button > span:not(.profile-avatar) { display: none; }
-  .catalog-tools { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .catalog-tools { display: grid; flex-basis: 100%; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .toolbar-actions { width: 100%; }
   .search-field { max-width: none; height: 36px; }
   .filters { max-width: 100%; gap: 4px; }
   .intro-actions { width: 100%; }.intro-actions .button { flex: 1; min-width: 0; }
