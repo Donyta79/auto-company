@@ -1795,6 +1795,34 @@ test('source selection keeps its current fields when an older takeover fails', a
   await expect(page.locator('#sourceManagerStatus')).toHaveText(status);
 });
 
+for (const failure of [false, true]) {
+  test(`source switch keeps the serial action lock visible until old ${failure ? 'failure' : 'success'} finishes`, async ({ page, center }) => {
+    await queueFixture(page, center, false);
+    const sources = ['source-a', 'source-b'].map(sourceId => ({ sourceId, kind: 'runtime', revision: 1, displayName: sourceId, availability: 'available' }));
+    let selected = false; let pending; const selections = [];
+    await page.route(`**/api/center/v1/entries/${center.entryId}`, route => route.fulfill({ json: centerEnvelope({
+      entryId: center.entryId, sourceId: selected ? 'source-b' : 'source-a', revision: 1, sources, capabilities: { takeover: true },
+    }) }));
+    await page.route('**/api/center/v1/sources/source-a/takeover', route => { pending = route; });
+    await page.route(`**/api/center/v1/entries/${center.entryId}/source-selection`, route => {
+      selections.push(route.request().postDataJSON()); selected = true; return route.fulfill({ json: centerEnvelope({}) });
+    });
+    await page.locator('.more-button').first().click(); await page.getByRole('menuitem', { name: 'Manage sources', exact: true }).click();
+    const takeover = page.locator('#sourceManagerBody button').filter({ hasText: /^Take over with center$/ });
+    await takeover.click(); await expect.poll(() => Boolean(pending)).toBe(true);
+    const sourceB = page.locator('#sourceManagerBody [role="radio"][value="source-b"]'); await sourceB.check();
+    const useB = page.locator('#sourceManagerBody button').filter({ hasText: /^Use selected source$/ });
+    await expect(useB).toBeDisabled(); await expect(useB.locator('..')).toContainText('Operation in progress');
+    const root = page.locator('#sourceManagerBody .reconnect-field input'); await root.fill('/fixture/b-draft');
+    await finishDelayedResponse(page, pending, failure ? { status: 409, json: { code: 'SOURCE_CHANGED' } } : { json: centerEnvelope({ state: 'succeeded' }) });
+    await expect(useB).toBeEnabled(); await expect(takeover).toBeDisabled(); await expect(sourceB).toBeChecked();
+    await expect(root).toHaveValue('/fixture/b-draft'); await expect(root).toBeFocused();
+    await expect(page.locator('#sourceManagerStatus')).toBeEmpty(); expect(selections).toEqual([]);
+    await useB.click(); await expect.poll(() => selections.length).toBe(1);
+    expect(selections[0].sourceId).toBe('source-b'); await expect(page.locator('#sourceManagerStatus')).toHaveText('Current source updated.');
+  });
+}
+
 test('closing confirmation falls back inside the queue when its original action disappears', async ({ page, center }) => {
   await queueFixture(page, center, false);
   await page.locator('#queueNavButton').click();

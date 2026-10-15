@@ -16,7 +16,7 @@ window.DashboardNavigation.register('center', (view) => {
     activeEntry: null, managementEntry: null, selectedSourceId: null, sourceToken: 0, sourceRefreshToken: 0, sourceStatusToken: 0, probe: null, probeToken: 0, confirmAction: null, drawerOpen: false, pendingWrites: new Map(), projectionSignature: "", projectionTimer: null,
     activeWorkGroupId: null, nextWorkGroupId: 0, workSubmitting: false,
     lastSuccessAt: null, restoreScroll: null, focusOrder: [], announcement: "",
-    actionLocks: new Set(), requestActions: new Map(),
+    actionLocks: new Set(), requestActions: new Map(), sourceActions: [],
     autoRefresh: true,
     otherExpanded: false,
     sort: "activity", sortDirection: "desc", roundFilter: "all", previewMode: "screenshot",
@@ -1238,24 +1238,34 @@ window.DashboardNavigation.register('center', (view) => {
     } catch (error) { if (isCurrent()) sourceStatus(message("requestFailed", { detail: errorText(error) }), true); }
   }
 
+  function syncSourceActions() {
+    const busy = $("sourceManagerBody").dataset.submitting === "true";
+    for (const { button, hint, enabled, reason } of state.sourceActions) {
+      button.disabled = busy || !enabled;
+      hint.textContent = busy && enabled ? message("operationInProgress") : enabled ? "" : capabilityReason(reason);
+    }
+  }
+
   function managementAction(container, labelKey, enabled, reason, action, danger = false) {
     const row = element("div", "management-action");
     const button = element("button", `button ${danger ? "danger" : "secondary"}`, message(labelKey)); button.type = "button"; button.disabled = !enabled;
     if (enabled) button.addEventListener("click", async () => {
-      const scope = $("sourceManagerBody"); if (scope.dataset.submitting === "true") return;
+      const scope = $("sourceManagerBody"); if (scope.dataset.submitting === "true") { sourceStatus(message("operationInProgress")); return; }
       scope.dataset.submitting = "true"; scope.setAttribute("aria-busy", "true");
       const focusedOnStart = document.activeElement === button;
-      const controls = [...scope.querySelectorAll('button:not([role="radio"])')].map(node => [node, node.disabled]); controls.forEach(([node]) => { node.disabled = true; });
+      syncSourceActions();
       const label = button.textContent; button.textContent = message("actionPending");
       try { await action(); }
-      finally { delete scope.dataset.submitting; scope.removeAttribute("aria-busy"); controls.forEach(([node, disabled]) => { if (node.isConnected) node.disabled = disabled; }); if (button.isConnected) { button.textContent = label; if (focusedOnStart && (document.activeElement === document.body || document.activeElement?.dataset.dialogId === "sourceDialog") && $("sourceDialog").open) focusControl(button); } }
+      finally { delete scope.dataset.submitting; scope.removeAttribute("aria-busy"); syncSourceActions(); if (button.isConnected) { button.textContent = label; if (focusedOnStart && (document.activeElement === document.body || document.activeElement?.dataset.dialogId === "sourceDialog") && $("sourceDialog").open) focusControl(button); } }
     });
-    row.append(button, element("small", "", enabled ? "" : capabilityReason(reason)));
+    const hint = element("small");
+    state.sourceActions.push({ button, hint, enabled, reason }); syncSourceActions();
+    row.append(button, hint);
     container.append(row);
   }
 
   function renderSourceManager() {
-    const entry = state.managementEntry; const body = clear($("sourceManagerBody")); if (!entry) return;
+    const entry = state.managementEntry; const body = clear($("sourceManagerBody")); state.sourceActions = []; if (!entry) return;
     const isCurrent = sourceContext();
     const sources = Array.isArray(entry.sources) ? entry.sources : [];
     if (!sources.length) { body.append(element("p", "list-state", message("noSources"))); return; }

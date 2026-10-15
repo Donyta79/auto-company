@@ -1395,6 +1395,40 @@ function sourceChoice(h, id) {
 }
 
 for (const failure of [false, true]) {
+  test(`source action lock stays explicit after switching sources and unlocks after old ${failure ? 'failure' : 'success'}`, async () => {
+    const h = harness(); const pending = deferred(); const writes = []; let selected = false;
+    const detail = { entryId: 'entry-a', sourceId: 'source-a', revision: 1, capabilities: { takeover: true }, sources: [
+      { sourceId: 'source-a', kind: 'product', revision: 1 }, { sourceId: 'source-b', kind: 'product', revision: 1 },
+    ] };
+    h.context.fetch = async () => envelope(detail); await h.openSourceManager({ entryId: 'entry-a' });
+    h.context.fetch = async (url, options) => {
+      if (options.method === 'POST') {
+        writes.push({ url, body: JSON.parse(options.body) });
+        if (url.endsWith('/takeover')) return pending.promise;
+        selected = true; return envelope({});
+      }
+      return url.endsWith('/entries/entry-a') ? envelope({ ...detail, sourceId: selected ? 'source-b' : 'source-a' }) : refreshResponse(url);
+    };
+    const action = label => h.state.sourceActions.find(item => item.button.textContent === label);
+    const old = action('Take over with center').button.fire('click');
+    sourceChoice(h, 'source-b').fire('change');
+    const useB = action('Use selected source');
+    assert.equal(useB.button.disabled, true); assert.match(useB.hint.textContent, /Operation in progress/);
+    assert.equal(writes.length, 1);
+    const root = h.nodes.sourceManagerBody.children[2].children[1]; root.value = '/draft-for-b'; h.context.document.activeElement = root;
+    if (failure) pending.reject(new Error('Old A failed')); else pending.resolve(envelope({ state: 'succeeded' }));
+    await old;
+    assert.equal(h.state.selectedSourceId, 'source-b'); assert.equal(h.nodes.sourceManagerStatus.textContent, '');
+    assert.equal(useB.button.disabled, false); assert.equal(useB.hint.textContent, '');
+    assert.equal(action('Take over with center').button.disabled, true, 'business-disabled actions stay disabled');
+    assert.equal(root.value, '/draft-for-b'); assert.equal(h.context.document.activeElement, root);
+    await useB.button.fire('click');
+    assert.equal(writes.length, 2); assert.equal(writes[1].body.sourceId, 'source-b');
+    assert.equal(h.nodes.sourceManagerStatus.textContent, 'Current source updated.');
+  });
+}
+
+for (const failure of [false, true]) {
   test(`source selection clears the old pending status even when its operation later ${failure ? 'fails' : 'succeeds'}`, async () => {
     const h = harness(); const pending = deferred();
     const detail = { entryId: 'entry-a', sourceId: 'source-a', sources: [
