@@ -46,11 +46,6 @@
         </nav>
         <a id="productInfoJump" class="product-info-jump" href="#projectSidebar" data-i18n="productInfo">产品信息</a>
       </div>
-        <div id="runtimeControls" class="header-actions" hidden>
-          <button id="startButton" class="button start-button" disabled data-i18n="start">启动运行</button>
-          <button id="stopButton" class="button stop-button" disabled data-i18n="stop">停止运行</button>
-          <a class="quiet-link legacy-link" href="/legacy" data-i18n="legacy" hidden>旧版对照 ↗</a>
-        </div>
         <div class="workspace-tools">
           <button id="settingsButton" class="icon-button settings-trigger" type="button"><svg class="ui-icon" data-lucide="settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />  <circle cx="12" cy="12" r="3" /></svg><span class="sr-only" data-i18n="settings">设置</span></button>
         <button id="profileButton" class="profile-button" type="button" aria-haspopup="dialog" aria-controls="settingsDialog"><span class="profile-avatar" aria-hidden="true" data-i18n="localInitial">本</span><span data-i18n="localWorkspace">本机</span><span class="profile-chevron" data-icon="chevron-down" aria-hidden="true"></span></button>
@@ -76,7 +71,11 @@
             <div id="historyList"></div>
           </section>
           </div>
-          <aside id="projectSidebar" class="project-sidebar" aria-label="项目概况" tabindex="-1"></aside>
+          <aside id="projectSidebar" class="project-sidebar" aria-label="项目概况" tabindex="-1">
+            <div id="runtimeControls" class="runtime-controls" hidden>
+              <button id="runtimeActionButton" class="button" type="button" disabled data-action="start" data-i18n="start">启动运行</button>
+            </div>
+          </aside>
 
         </div>
       </section>

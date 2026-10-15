@@ -7,7 +7,7 @@ async function refreshRecords(page) {
 }
 
 async function stopRun(page) {
-  await page.locator("#stopButton").click();
+  await page.locator("#runtimeActionButton[data-action=stop]").click();
   await page.getByRole("alertdialog").getByRole("button", { name: "Stop run", exact: true }).click();
 }
 
@@ -16,8 +16,9 @@ test("opens the default work journal and refreshes through visible controls", as
   await expect(page.locator("#currentCycle")).toContainText("Browser smoke cycle completed");
   await expect(page.locator('a[href="/legacy"]:visible')).toHaveCount(0);
   expect((await page.request.get(`${dashboard.url}/legacy`)).status()).toBe(404);
-  await expect(page.locator("#startButton")).toBeEnabled();
-  await expect(page.locator("#stopButton")).toBeDisabled();
+  await expect(page.locator("#runtimeActionButton")).toBeEnabled();
+  await expect(page.locator("#runtimeActionButton")).toHaveAttribute("data-action", "start");
+  await expect(page.locator("#runtimeActionButton")).toHaveText("Start run");
   await page.locator("#tab-logs").click();
   await expect(page.locator("#logText")).toContainText("Browser fixture runtime log");
   await expect(page.locator("#rawText")).toBeHidden();
@@ -29,6 +30,29 @@ test("opens the default work journal and refreshes through visible controls", as
   await page.locator("#closeSettingsButton").click();
   expect((await status).status()).toBe(200);
   await expect(page.locator("#runtimeState")).toHaveText("Stopped");
+});
+
+test("one sidebar control and right-aligned tabs stay clear of the brand at narrow widths", async ({ page }) => {
+  await expect(page.locator('#runtimeActionButton')).toHaveCount(1);
+  await expect(page.locator('.topbar #runtimeControls')).toHaveCount(0);
+  await expect(page.locator('#projectSidebar .project-identity #runtimeActionButton')).toBeVisible();
+  await expect(page.locator('#readOnlyIndicator')).toBeHidden();
+  for (const width of [1280, 1001, 1000, 760, 390, 360]) {
+    await page.setViewportSize({ width, height: 900 });
+    const bounds = await page.evaluate(() => {
+      const rect = selector => document.querySelector(selector).getBoundingClientRect().toJSON();
+      return { brand: rect('.brand'), tools: rect('.workspace-tools'), header: rect('.topbar'),
+        navigation: rect('.navline'), tabs: rect('.ac-tabs-host'), name: rect('#projectName'),
+        button: rect('#runtimeActionButton'), title: rect('.workspace-project-heading'),
+        overflow: document.documentElement.scrollWidth > innerWidth };
+    });
+    expect(bounds.brand.right).toBeLessThanOrEqual(bounds.tools.left);
+    expect(bounds.brand.top).toBeGreaterThanOrEqual(bounds.header.top);
+    expect(bounds.name.right).toBeLessThanOrEqual(bounds.button.left);
+    expect(bounds.navigation.right - bounds.tabs.right).toBeLessThanOrEqual(20);
+    if (width > 760) expect(bounds.title.right).toBeLessThanOrEqual(bounds.tabs.left);
+    expect(bounds.overflow).toBe(false);
+  }
 });
 
 test("saves shared language through HTTP and retains it after reload", async ({ page, dashboard }) => {
@@ -82,10 +106,10 @@ test.describe("server errors", () => {
     await expect(page.locator("#languageSelect")).toHaveValue("en");
     await expect(page.locator("html")).toHaveAttribute("lang", "en");
     await page.locator("#closeSettingsButton").click();
-    await page.locator("#startButton").click();
+    await page.locator("#runtimeActionButton[data-action=start]").click();
     await expect(page.locator("#actionStatus")).toContainText(/Could not confirm.*Start run/);
     await expect(page.locator("#actionStatus")).toContainText("Host actions are disabled in browser smoke tests.");
-    await expect(page.locator("#startButton")).toBeEnabled();
+    await expect(page.locator("#runtimeActionButton[data-action=start]")).toBeEnabled();
     await expect(page.locator("#runtimeState")).toHaveText("Stopped");
   });
 });
@@ -97,14 +121,13 @@ test("shows a failed journal request and recovers on refresh", async ({ page }) 
   await refreshRecords(page);
   await expect(page.locator("#connectionError")).toBeVisible();
   await expect(page.locator("#runtimeState")).toHaveText("Status unavailable");
-  await expect(page.locator("#startButton")).toBeDisabled();
-  await expect(page.locator("#stopButton")).toBeDisabled();
+  await expect(page.locator("#runtimeActionButton")).toBeDisabled();
   await expect(page.locator("#currentCycle")).toContainText("Browser smoke cycle completed");
   await page.unroute("**/api/journal");
   await refreshRecords(page);
   await expect(page.locator("#connectionError")).toBeHidden();
   await expect(page.locator("#runtimeState")).toHaveText("Stopped");
-  await expect(page.locator("#startButton")).toBeEnabled();
+  await expect(page.locator("#runtimeActionButton[data-action=start]")).toBeEnabled();
 });
 
 test("a stale journal refresh cannot undo a confirmed shared-language save", async ({ page }) => {
@@ -136,8 +159,7 @@ test("unavailable bootstrap stays usable and can recover from visible controls",
   await page.reload();
   await expect(page.locator("#connectionError")).toBeVisible();
   await expect(page.locator("#refreshButton")).toBeEnabled();
-  await expect(page.locator("#startButton")).toBeDisabled();
-  await expect(page.locator("#stopButton")).toBeDisabled();
+  await expect(page.locator("#runtimeActionButton")).toBeDisabled();
   await page.locator("#settingsButton").click();
   await expect(page.locator("#settingsDialog")).toBeVisible();
   await page.locator("#closeSettingsButton").click();
@@ -152,8 +174,8 @@ test.describe("host action boundary", () => {
   test.use({ scenario: "action-success" });
 
   test("stop is immediate during a slow refresh and disables duplicate controls", async ({ page }) => {
-    await page.locator("#startButton").click();
-    await expect(page.locator("#stopButton")).toBeEnabled();
+    await page.locator("#runtimeActionButton[data-action=start]").click();
+    await expect(page.locator("#runtimeActionButton[data-action=stop]")).toBeEnabled();
     let releaseStatus, releaseStop;
     let statusSeen, stopSeen;
     const statusGate = new Promise((resolve) => { releaseStatus = resolve; });
@@ -176,30 +198,36 @@ test.describe("host action boundary", () => {
     await stopRun(page);
     await stopReceived;
     await expect(page.locator("#runtimeState")).toHaveText("Stopping");
-    await expect(page.locator("#startButton")).toBeDisabled();
-    await expect(page.locator("#stopButton")).toBeDisabled();
+    await expect(page.locator("#runtimeActionButton")).toBeDisabled();
     releaseStatus();
     releaseStop();
     await expect(page.locator("#runtimeState")).toHaveText("Stopped");
-    await expect(page.locator("#startButton")).toBeEnabled();
+    await expect(page.locator("#runtimeActionButton[data-action=start]")).toBeEnabled();
   });
 
   test("start and stop use the real HTTP protocol and refresh verified state", async ({ page, dashboard }) => {
     const start = page.waitForResponse((response) => response.url().endsWith("/api/action/start"));
-    await page.locator("#startButton").click();
+    await page.locator("#runtimeActionButton[data-action=start]").click();
     expect((await start).request().method()).toBe("POST");
     expect((await start).request().postData()).toBe("{}");
     await expect(page.locator("#runtimeState")).toHaveText("Running");
-    await expect(page.locator("#startButton")).toBeDisabled();
-    await expect(page.locator("#stopButton")).toBeEnabled();
+    await expect(page.locator("#runtimeActionButton")).toBeEnabled();
+    await expect(page.locator("#runtimeActionButton")).toHaveAttribute("data-action", "stop");
+    await expect(page.locator("#runtimeActionButton")).toHaveText("Stop run");
     const running = await (await page.request.get(`${dashboard.url}/api/journal`)).json();
     expect(running).toMatchObject({ readOnly: false, runtime: { available: true, processState: "running" } });
+    let stopRequests = 0;
+    page.on('request', request => { if (request.url().endsWith('/api/action/stop')) stopRequests += 1; });
+    await page.locator('#runtimeActionButton').click();
+    await page.locator('#cancelStopConfirm').click();
+    await expect(page.locator('#runtimeActionButton')).toHaveAttribute('data-action', 'stop');
+    expect(stopRequests).toBe(0);
     const stop = page.waitForResponse((response) => response.url().endsWith("/api/action/stop"));
     await stopRun(page);
     expect((await stop).request().method()).toBe("POST");
     await expect(page.locator("#runtimeState")).toHaveText("Stopped");
-    await expect(page.locator("#stopButton")).toBeDisabled();
-    await expect(page.locator("#startButton")).toBeEnabled();
+    await expect(page.locator("#runtimeActionButton")).toBeEnabled();
+    await expect(page.locator("#runtimeActionButton")).toHaveAttribute("data-action", "start");
   });
 });
 
@@ -209,11 +237,11 @@ test.describe("a verified running cycle", () => {
   test("failed stop remains visible after reload and permits retry only", async ({ page }) => {
     await stopRun(page);
     await expect(page.locator("#runtimeState")).toHaveText("Stop incomplete — retry Stop");
-    await expect(page.locator("#startButton")).toBeDisabled();
-    await expect(page.locator("#stopButton")).toBeEnabled();
+    await expect(page.locator("#runtimeActionButton")).toBeEnabled();
+    await expect(page.locator("#runtimeActionButton")).toHaveAttribute("data-action", "stop");
     await page.reload();
     await expect(page.locator("#runtimeState")).toHaveText("Stop incomplete — retry Stop");
-    await expect(page.locator("#stopButton")).toBeEnabled();
+    await expect(page.locator("#runtimeActionButton[data-action=stop]")).toBeEnabled();
   });
 
   test("shows current execution separately from the last completed report", async ({ page, dashboard }) => {
@@ -226,7 +254,7 @@ test.describe("a verified running cycle", () => {
     await page.locator("#tab-logs").click();
     await page.locator("#logSelect").selectOption("cycle-0002-browser");
     await expect(page.locator("#logText")).toContainText("Current cycle fixture log");
-    await expect(page.locator("#startButton")).toBeDisabled();
-    await expect(page.locator("#stopButton")).toBeEnabled();
+    await expect(page.locator("#runtimeActionButton")).toBeEnabled();
+    await expect(page.locator("#runtimeActionButton")).toHaveAttribute("data-action", "stop");
   });
 });

@@ -214,8 +214,9 @@ test("journal renders source history and never treats a report as live telemetry
   expect(snapshot.consensus).not.toHaveProperty("nextAction");
   await expect(page.locator("body")).toContainText(/只读|预览/);
   await expect(page.locator("body")).not.toContainText("本轮执行中");
-  await expect(page.locator("#startButton")).toBeDisabled();
-  await expect(page.locator("#stopButton")).toBeDisabled();
+  await expect(page.locator("#runtimeActionButton")).toBeDisabled();
+  await expect(page.locator("#runtimeControls")).toBeHidden();
+  await expect(page.locator("#readOnlyIndicator svg")).toHaveAttribute("data-lucide", "eye");
   await page.locator("#settingsButton").click();
   await expect(page.locator("#languageSelect")).toBeDisabled();
   await page.locator("#closeSettingsButton").click();

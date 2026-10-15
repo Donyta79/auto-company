@@ -283,12 +283,16 @@ html[data-ui=shadcn] #settingsForm { padding: 0; gap: 0; display: flex; flex-dir
 .topbar .header-actions { flex: 0 0 auto; margin-left: auto; }
 .topbar .header-actions[hidden] { display: none; }
 .topbar > .workspace-tools { margin-left: 0; }
-.topbar .ac-tabs-host { flex: 0 1 auto; }
+.topbar .ac-tabs-host { flex: 0 1 auto; margin-left: auto; }
+.topbar .ac-tabs [data-slot=tabs-list] { justify-content: flex-end; }
+.topbar .ac-tabs [data-slot=tabs-trigger] { flex: 0 0 auto; }
 .project-identity { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .project-title-group { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
 .project-title-group h1 { padding: 0; min-width: 0; }
 .project-title-group .product-switcher-button { flex: 0 0 24px; width: 24px; margin: 0; }
 .project-identity .project-runtime-status { flex: 0 0 auto; margin: 0; }
+.runtime-controls { flex: 0 0 auto; }
+.runtime-controls .button { min-width: 112px; white-space: nowrap; }
 .runtime-disclosure .sidebar-disclosure-heading { padding: 0; margin: 0 0 7px; height: auto; min-height: 26px; font-size: var(--text-title); line-height: 1.45; font-weight: 700; border-radius: 0; }
 .history-content .cycle-report-surface { font-size: inherit; }
 .history-content .cycle-report-footer .cycle-log-link { margin: 0 0 0 auto; }
@@ -380,7 +384,7 @@ html[data-ui=shadcn] #settingsForm { padding: 0; gap: 0; display: flex; flex-dir
 .app-frame header { position: relative; }
 .app-frame header::after { content: ''; position: absolute; top: 100%; left: 0; right: 0; height: 12px; background: var(--ui-header-background); pointer-events: none; }
 .app-frame header::before { content: ''; position: absolute; top: 100%; left: 0; right: 0; height: 12px; border-radius: 12px 12px 0 0; background: #fff; z-index: 1; pointer-events: none; }
-.workspace-project-heading { position: absolute; left: 50%; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 4px; max-width: calc(100% - 280px); white-space: nowrap; font-size: var(--text-body); line-height: 1.5; font-weight: 600; padding: 4px 9px; border: 0; border-radius: 5px; background: var(--ui-label-background); color: var(--ui-label-foreground); }
+.workspace-project-heading { position: absolute; left: 50%; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 4px; max-width: calc(100% - 560px); white-space: nowrap; font-size: var(--text-body); line-height: 1.5; font-weight: 600; padding: 4px 9px; border: 0; border-radius: 5px; background: var(--ui-label-background); color: var(--ui-label-foreground); }
 .workspace-project-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .workspace-project-heading .header-runtime-context { flex: 0 0 20px; width: 20px; height: 20px; }
 .workspace-project-heading .read-only-indicator { position: relative; width: 20px; height: 20px; }
@@ -397,8 +401,7 @@ html[data-ui=shadcn] #settingsForm { padding: 0; gap: 0; display: flex; flex-dir
   .topbar { grid-template-rows: 56px 48px; height: 104px; min-height: 104px; }
   .header-inner { grid-template-rows: 56px; }
   .topbar > .brand, .header-inner > .brand { grid-column: 1; grid-row: 1; align-self: center; white-space: nowrap; }
-  .topbar > .header-actions { grid-column: 2; grid-row: 1; }
-  .topbar > .workspace-tools { grid-column: 3; grid-row: 1; }
+  .topbar > .workspace-tools { grid-column: 2 / -1; grid-row: 1; justify-self: end; }
   .header-inner > .workspace-tools { grid-column: 2 / -1; grid-row: 1; justify-self: end; }
   .topbar > .navline { grid-column: 1 / -1; grid-row: 2; flex-wrap: nowrap; gap: 8px; }
 }
@@ -407,7 +410,7 @@ html[data-ui=shadcn] #settingsForm { padding: 0; gap: 0; display: flex; flex-dir
   .topbar > .navline { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; grid-template-rows: 40px 48px; height: 88px; padding-inline: 12px; gap: 0 8px; }
   .topbar .journal-back-link { grid-column: 1; grid-row: 1; min-width: 0; }
   .workspace-project-heading { grid-column: 2; grid-row: 1; position: static; transform: none; justify-self: center; min-width: 0; max-width: 100%; }
-  .topbar .ac-tabs-host { grid-column: 1 / -1; grid-row: 2; }
+  .topbar .ac-tabs-host { grid-column: 1 / -1; grid-row: 2; width: 100%; }
   .topbar .ac-tabs [data-slot=tabs-list] { width: 100%; flex-wrap: nowrap; }
   .topbar .product-info-jump { grid-column: 3; grid-row: 1; white-space: nowrap; }
   .journal-layout { grid-template-columns: minmax(0, 1fr); }
