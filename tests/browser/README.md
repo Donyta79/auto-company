@@ -30,6 +30,12 @@ catalog and HTTP handlers with a fake execution adapter; the clone worker and
 preview health are injected. These fixtures do not verify a live model or preview
 process and are not product showcase screenshots.
 
+Center race regressions hold HTTP responses while users close or reopen shared
+Radix dialogs, edit settings, switch sources, or replace import candidates. They
+also verify incomplete refresh freshness, retry focus and nested dialog return
+focus. New-work tests use the current batch form and endpoint. Fixture screenshots
+are saved through each test's output path, never into historical acceptance folders.
+
 Python defaults to `python` on Windows and `python3` elsewhere. Set
 `AUTONOMOUS_COMPANY_BROWSER_PYTHON` to an executable path if needed. Tests run serially
 without automatic retries. Failures retain screenshots, traces and server logs

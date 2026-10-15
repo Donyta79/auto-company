@@ -279,8 +279,15 @@ class CenterRuntime:
             # ownership outlives their final audit write, including shutdown.
             worker.join()
 
+    @staticmethod
+    def _revision_value(body, field):
+        value = body.get(field)
+        if value is not None and (type(value) is not int or not 0 <= value <= 9007199254740991):
+            raise CenterError("INVALID_REQUEST", f"{field} must be an integer")
+        return value
+
     def _expected(self, body, record=None):
-        expected = body.get("expectedRevision")
+        expected = self._revision_value(body, "expectedRevision")
         actual = record.get("revision", 0) if record else self.store.revision
         if expected is not None and expected != actual:
             raise CenterError("REVISION_CONFLICT", "The item changed; refresh before retrying", 409, {"revision": actual})
@@ -470,6 +477,7 @@ class CenterRuntime:
         return entry, source, runtime
 
     def _config(self, body, root=None, tx=None):
+        config_revision = self._revision_value(body, "configRevision")
         if tx is not None:
             preferences = tx.get("preferences", "main")
         else:
@@ -485,7 +493,7 @@ class CenterRuntime:
             raise CenterError("INVALID_CONFIG", "Unsupported execution configuration")
         config.update(supplied)
         profiles.validate(config)
-        if body.get("configRevision") is not None and body["configRevision"] != preferences["revision"]:
+        if config_revision is not None and config_revision != preferences["revision"]:
             raise CenterError("REVISION_CONFLICT", "Default configuration changed", 409)
         if root:
             sys.path.insert(0, str(self.framework_root / "scripts/core"))
@@ -500,7 +508,7 @@ class CenterRuntime:
 
     def _new_request(self, tx, entry, source, runtime, body, request_id=None):
         kind, mode = body.get("kind", "continue"), body.get("executionMode", "enqueue")
-        if kind not in {"explore", "continue"} or mode not in {"enqueue", "start_now"}:
+        if not isinstance(kind, str) or not isinstance(mode, str) or kind not in {"explore", "continue"} or mode not in {"enqueue", "start_now"}:
             raise CenterError("INVALID_REQUEST", "Invalid request kind or execution mode")
         rows = tx.list("requests")
         if any((row["entryId"] == entry["entryId"] or row["runtimeId"] == runtime["runtimeId"]) and row["state"] in OPEN for row in rows):
@@ -530,8 +538,14 @@ class CenterRuntime:
                 if previous:
                     return self._request_view(tx, tx.get("requests", previous["requestId"]))
                 self._expected(body)
+                expected_source = self._revision_value(body, "expectedSourceRevision")
+                self._revision_value(body, "configRevision")
+                for field in ("entryId", "sourceId", "runtimeId"):
+                    value = body.get(field)
+                    if value is not None and not isinstance(value, str):
+                        raise CenterError("INVALID_REQUEST", f"{field} must be a string")
             entry, source, runtime = self._source(body.get("entryId"), body.get("sourceId"))
-            if body.get("runtimeId") not in {None, runtime["runtimeId"]} or body.get("expectedSourceRevision") != source["sourceRevision"]:
+            if body.get("runtimeId") not in {None, runtime["runtimeId"]} or expected_source != source["sourceRevision"]:
                 raise CenterError("SOURCE_CHANGED", "Source revision changed", 409)
             if not self.adapter.available:
                 raise CenterError("EXECUTION_DOMAIN_UNCONFIGURED", "Execution domain is not configured", 409)
@@ -547,7 +561,10 @@ class CenterRuntime:
     def _stop_tx(self, tx, request, body, actor="local_operator_intent", reason="user_stop"):
         if request["state"] not in {"starting", "running", "stopping", "attention"} or not request.get("dispatchId"):
             raise CenterError("NOT_STARTED", "Only an owned dispatch can be stopped", 409)
-        if body.get("expectedDispatchId") not in {None, request["dispatchId"]}:
+        expected_dispatch = body.get("expectedDispatchId")
+        if expected_dispatch is not None and not isinstance(expected_dispatch, str):
+            raise CenterError("INVALID_REQUEST", "expectedDispatchId must be a string")
+        if expected_dispatch not in {None, request["dispatchId"]}:
             raise CenterError("DISPATCH_CONFLICT", "Dispatch identity changed", 409)
         request["stopRequested"] = True
         request["stopReason"] = reason
@@ -621,7 +638,9 @@ class CenterRuntime:
                 elif action == "order":
                     ordered = body.get("requestIds")
                     waiting = {row["requestId"] for row in requests if row["state"] == "queued"}
-                    if not isinstance(ordered, list) or len(ordered) != len(set(ordered)) or set(ordered) != waiting:
+                    if not isinstance(ordered, list) or any(not isinstance(value, str) for value in ordered):
+                        raise CenterError("INVALID_REQUEST", "Queue order must be a list of request IDs")
+                    if len(ordered) != len(set(ordered)) or set(ordered) != waiting:
                         raise CenterError("REVISION_CONFLICT", "Queue order must contain every waiting request exactly once", 409)
                     for index, request_id in enumerate(ordered):
                         request = tx.get("requests", request_id)
@@ -653,7 +672,9 @@ class CenterRuntime:
             if not isinstance(updates, dict) or set(updates) - {"language", "productLanguage", "engine", "model", "effort"}:
                 raise CenterError("INVALID_PREFERENCE", "Unknown preference")
             candidate = {**preferences, **updates}
-            if candidate["language"] not in {"zh-CN", "en"} or candidate["productLanguage"] not in {"zh-CN", "en"} or candidate["engine"] not in ENGINES or candidate["effort"] not in EFFORTS:
+            if (any(not isinstance(candidate[field], str) for field in ("language", "productLanguage", "engine", "effort"))
+                    or candidate["language"] not in {"zh-CN", "en"} or candidate["productLanguage"] not in {"zh-CN", "en"}
+                    or candidate["engine"] not in ENGINES or candidate["effort"] not in EFFORTS):
                 raise CenterError("INVALID_PREFERENCE", "Invalid preference")
             if not isinstance(candidate["model"], str) or len(candidate["model"]) > 200 or any(ord(c) < 32 for c in candidate["model"]):
                 raise CenterError("INVALID_PREFERENCE", "Invalid model name")
@@ -744,7 +765,7 @@ class CenterRuntime:
         mode = body.get("executionMode", "enqueue")
         if not isinstance(direction, str) or len(direction) > 5000:
             raise CenterError("INVALID_DIRECTION", "Direction must be bounded text")
-        if mode not in {"enqueue", "start_now"}:
+        if not isinstance(mode, str) or mode not in {"enqueue", "start_now"}:
             raise CenterError("INVALID_REQUEST", "Invalid execution mode")
         operation_id = uid("operation")
         reserved = {key: uid(prefix) for key, prefix in (("entryId", "entry"), ("sourceId", "source"), ("runtimeId", "runtime"), ("requestId", "request"))}
