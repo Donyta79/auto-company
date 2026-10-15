@@ -1674,6 +1674,27 @@ test('settings save preserves newer input and retries against its own returned r
   await expect(model).toHaveValue('newer-unsaved-model'); await expect(page.locator('#settingsForm .form-status')).toHaveClass(/error/);
 });
 
+test('reopened settings hides old template controls until the new preferences load finishes', async ({ page, center }) => {
+  await queueFixture(page, center, false);
+  const preferences = { ...preferencesFixture, templates: [{ templateId: 'template-old', name: 'Previous template', config: { engine: 'claude', model: 'template-model', effort: 'high', productLanguage: 'en' } }] };
+  let pending; let hold = false;
+  await page.route('**/api/center/v1/preferences', route => {
+    if (hold) { pending = route; return; }
+    return route.fulfill({ json: centerEnvelope(preferences) });
+  });
+  await page.locator('#settingsButton').click();
+  const templates = page.locator('#settingsForm .template-controls');
+  await expect(templates).toBeVisible(); await expect(templates.locator('select')).toContainText('Previous template');
+  await page.locator('#settingsDialog .dialog-close').first().click(); await expect(page.locator('#settingsDialog')).not.toBeVisible();
+  hold = true; await page.locator('#settingsButton').click(); await expect.poll(() => Boolean(pending)).toBe(true);
+  await expect(templates).not.toBeVisible(); await expect(templates.locator('button').first()).not.toBeVisible();
+  await expect(page.locator('#settingsForm [name="model"]')).toBeDisabled();
+  await expect(page.locator('#settingsDialog .dialog-close').first()).toBeEnabled();
+  hold = false;
+  await finishDelayedResponse(page, pending, { json: centerEnvelope({ ...preferences, model: 'server-model', revision: 3 }) });
+  await expect(templates).toBeVisible(); await expect(page.locator('#settingsForm [name="model"]')).toHaveValue('server-model');
+});
+
 for (const kind of ['continue', 'new']) {
   test(`${kind} work completion preserves a reopened form and does not open the queue over it`, async ({ page, center }) => {
     const { entry } = await queueFixture(page, center, false);

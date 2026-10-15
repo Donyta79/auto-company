@@ -16,7 +16,7 @@ window.DashboardNavigation.register('center', (view) => {
     activeEntry: null, managementEntry: null, selectedSourceId: null, sourceToken: 0, sourceRefreshToken: 0, sourceStatusToken: 0, probe: null, probeToken: 0, confirmAction: null, drawerOpen: false, pendingWrites: new Map(), projectionSignature: "", projectionTimer: null,
     activeWorkGroupId: null, nextWorkGroupId: 0, workSubmitting: false,
     lastSuccessAt: null, restoreScroll: null, focusOrder: [], announcement: "",
-    actionLocks: new Set(),
+    actionLocks: new Set(), requestActions: new Map(),
     autoRefresh: true,
     otherExpanded: false,
     sort: "activity", sortDirection: "desc", roundFilter: "all", previewMode: "screenshot",
@@ -1319,6 +1319,8 @@ window.DashboardNavigation.register('center', (view) => {
 
   function setPreferenceFieldsDisabled(form, disabled) {
     for (const name of ["language", "engine", "model", "effort", "productLanguage"]) form.elements[name].disabled = disabled;
+    const templates = form.querySelector(".template-controls");
+    if (templates) templates.hidden = disabled;
   }
 
   async function loadPreferences() {
@@ -1393,15 +1395,28 @@ window.DashboardNavigation.register('center', (view) => {
   }
 
   async function runRequestAction(request, action, propagate = false) {
-    const lock = `request:${request.requestId}`; if (state.actionLocks.has(lock)) return;
+    const lock = `request:${request.requestId}`;
+    const settle = async (pending) => {
+      try { return await pending; }
+      catch (error) { if (propagate) throw error; showStatus("requestFailed", { detail: errorText(error) }, true); }
+    };
+    const current = state.requestActions.get(lock);
+    if (current && current.action === action) return settle(current.promise);
+    if (state.actionLocks.has(lock)) return settle(Promise.reject(new APIError({ code: "ACTION_IN_PROGRESS", messageKey: "operationInProgress" }, 409)));
     state.actionLocks.add(lock);
     const controls = [...document.querySelectorAll("[data-focus-key]")].filter(node => node.dataset.focusKey.startsWith(`${lock}:`)); controls.forEach(node => { node.disabled = true; });
-    try {
-      const body = action === "stop" ? { expectedDispatchId: request.dispatchId } : { expectedRevision: request.revision ?? state.revision };
-      await write(`/requests/${encodeURIComponent(request.requestId)}/${action}`, body, action === "stop" ? 60000 : 30000);
-      showStatus("actionAccepted"); await refresh();
-    } catch (error) { if (propagate) throw error; showStatus("requestFailed", { detail: errorText(error) }, true); }
-    finally { state.actionLocks.delete(lock); queueNodes.delete(request.requestId); queueSignature = ""; const focused = rememberFocus(); renderQueue(); restoreFocus(focused); }
+    const pending = (async () => {
+      try {
+        const body = action === "stop" ? { expectedDispatchId: request.dispatchId } : { expectedRevision: request.revision ?? state.revision };
+        await write(`/requests/${encodeURIComponent(request.requestId)}/${action}`, body, action === "stop" ? 60000 : 30000);
+        showStatus("actionAccepted"); await refresh();
+      }
+      finally { state.actionLocks.delete(lock); queueNodes.delete(request.requestId); queueSignature = ""; const focused = rememberFocus(); renderQueue(); restoreFocus(focused); }
+    })();
+    const operation = { action, promise: pending };
+    state.requestActions.set(lock, operation);
+    try { return await settle(pending); }
+    finally { if (state.requestActions.get(lock) === operation) state.requestActions.delete(lock); }
   }
 
   async function moveRequest(index, offset, queued) {

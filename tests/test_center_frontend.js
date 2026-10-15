@@ -629,7 +629,7 @@ function harness() {
   vm.runInContext(fs.readFileSync(path.join(dashboard, 'center-i18n.js'), 'utf8'), context);
   const app = fs.readFileSync(path.join(dashboard, 'center.js'), 'utf8');
   const end = app.lastIndexOf('\n  applyLanguage(); wire(); renderPage(); refresh();');
-  vm.runInContext(app.slice(0, end) + '\n renderPage = () => {}; renderQueue = () => {}; globalThis.center = {state, wire, confirmRequestAction, queueItem, refresh, api, submitProbe, commitImport, loadPreferences, savePreferences, openSourceManager, refreshSourceManager, sourceOperation, openContinue, submitContinue, submitNewWork, openDialog, setQueueObserver: callback => { openQueue = callback; }, setGroupRenderer: callback => { updateGroupButtons = callback; }};\n});', context);
+  vm.runInContext(app.slice(0, end) + '\n renderPage = () => {}; renderQueue = () => {}; globalThis.center = {state, wire, runRequestAction, confirmRequestAction, queueItem, refresh, api, submitProbe, commitImport, loadPreferences, savePreferences, openSourceManager, refreshSourceManager, sourceOperation, openContinue, submitContinue, submitNewWork, openDialog, setQueueObserver: callback => { openQueue = callback; }, setGroupRenderer: callback => { updateGroupButtons = callback; }};\n});', context);
   context.center.state.language = 'en';
   context.center.wire();
   nodes.confirmForm.querySelector = selector => selector === '[type="submit"]' ? document.getElementById('confirmActionButton') : nodes.confirmForm.status ||= new Node();
@@ -643,6 +643,27 @@ function refreshResponse(url) {
   return envelope(url.includes('/summary') ? { language: 'en' } : url.includes('/preferences') ? {} : { items: [], total: 0 });
 }
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
+
+test('pending request actions retain raw failure for a later propagating caller', async () => {
+  const h = harness(); const pending = deferred(); let writes = 0;
+  h.context.fetch = async (url, options) => options.method === 'POST' ? (++writes, pending.promise) : refreshResponse(url);
+  const request = { requestId: 'request-one', revision: 1 };
+  const first = h.runRequestAction(request, 'reconcile');
+  const duplicate = h.runRequestAction(request, 'reconcile', true);
+  const rejection = assert.rejects(duplicate, /Connection lost/);
+  pending.reject(new Error('Connection lost')); await first; await rejection;
+  assert.equal(writes, 1); assert.match(h.nodes.actionError.children.map(node => node.textContent).join(''), /Connection lost/);
+});
+
+test('a different pending request action cannot satisfy a new confirmation', async () => {
+  const h = harness(); const pending = deferred(); let writes = 0;
+  h.context.fetch = async (url, options) => options.method === 'POST' ? (++writes, pending.promise) : refreshResponse(url);
+  const request = { requestId: 'request-one', revision: 1 };
+  const first = h.runRequestAction(request, 'reconcile');
+  await assert.rejects(h.runRequestAction(request, 'stop', true), error => error.code === 'ACTION_IN_PROGRESS');
+  assert.equal(writes, 1);
+  pending.resolve(envelope({})); await first;
+});
 
 for (const action of ['stop', 'cancel']) {
   for (const failure of ['transport', 'revision']) {
@@ -791,6 +812,18 @@ test('preferences cannot save before a successful form load', async () => {
   assert.equal(writes, 0);
   pending.reject(new Error('offline')); await loading;
   assert.equal(h.button.disabled, true);
+});
+
+test('preferences loading makes previously rendered template controls unreachable through failure', async () => {
+  const h = preferencesHarness(); const pending = deferred(); const templates = { hidden: false };
+  const query = h.form.querySelector;
+  h.form.querySelector = selector => selector === '.template-controls' ? templates : query(selector);
+  h.context.fetch = async () => pending.promise;
+  const loading = h.loadPreferences();
+  assert.equal(templates.hidden, true);
+  assert.equal(h.form.elements.model.disabled, true);
+  pending.reject(new Error('offline')); await loading;
+  assert.equal(templates.hidden, true); assert.equal(h.button.disabled, true);
 });
 
 test('reopened preferences keep newer form data when an earlier load finishes late', async () => {
@@ -1144,8 +1177,24 @@ for (const action of ['stop', 'cancel']) {
     h.nodes.confirmDialog.close(); h.confirmRequestAction(request, action);
     assert.equal(h.nodes.confirmActionButton.disabled, false);
     const second = h.nodes.confirmForm.fire('submit'); assert.equal(writes, 1);
+    await Promise.resolve();
+    assert.equal(h.nodes.confirmDialog.open, true, 'the reopened confirmation must still await the original request');
+    assert.equal(h.nodes.confirmActionButton.disabled, true);
     pending.resolve(envelope({})); await Promise.all([first, second]);
     assert.equal(h.nodes.confirmDialog.open, false); assert.equal(writes, 1);
+  });
+
+  test(`${action} reopened confirmation keeps the shared request failure visible`, async () => {
+    const h = harness(); const pending = deferred(); let writes = 0;
+    h.context.fetch = async (url, options) => options.method === 'POST' ? (++writes, pending.promise) : refreshResponse(url);
+    const request = { requestId: 'request-a', dispatchId: 'dispatch-a', revision: 1 };
+    h.confirmRequestAction(request, action); const first = h.nodes.confirmForm.fire('submit');
+    h.nodes.confirmDialog.close(); h.confirmRequestAction(request, action);
+    const second = h.nodes.confirmForm.fire('submit'); await Promise.resolve();
+    assert.equal(h.nodes.confirmDialog.open, true); assert.equal(h.nodes.confirmActionButton.disabled, true);
+    pending.reject(new Error('shared operation failed')); await Promise.all([first, second]);
+    assert.equal(writes, 1); assert.equal(h.nodes.confirmDialog.open, true);
+    assert.equal(h.nodes.confirmActionButton.disabled, false); assert.match(h.nodes.confirmForm.status.textContent, /shared operation failed/);
   });
 }
 
