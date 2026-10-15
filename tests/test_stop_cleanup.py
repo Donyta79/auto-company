@@ -1,6 +1,7 @@
 """Targeted stop ownership and interruption checks; no model or user service."""
 
 import importlib.util
+from http.client import HTTPMessage
 import json
 import os
 from pathlib import Path
@@ -162,7 +163,8 @@ class DashboardStopTests(unittest.TestCase):
         server = load("stop_server", ROOT / "dashboard/server.py")
         handler = server.DashboardHandler.__new__(server.DashboardHandler)
         handler.path = "/api/action/stop"
-        handler.headers = {"Content-Type": "application/json"}
+        handler.headers = HTTPMessage()
+        handler.headers["Content-Type"] = "application/json"
         handler._request_allowed = lambda: True
         handler._json = mock.Mock()
         success = {"ok": True, "exitCode": 0, "elapsedMs": 1, "output": ""}
