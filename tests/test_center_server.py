@@ -1,6 +1,8 @@
 """HTTP boundary checks; fixture data here is never used for acceptance screenshots."""
 
 import http.client
+from email.message import Message
+import io
 import json
 from pathlib import Path
 import sys
@@ -59,6 +61,7 @@ class CenterHttpTests(unittest.TestCase):
             ("{}", {"Content-Type": "text/plain"}, 415),
             ('{"kind":"continue","kind":"explore"}', {}, 400),
             ('{"value":NaN}', {}, 400),
+            ('{"value":1e999}', {}, 400),
             ("[]", {}, 400),
             ("{invalid", {}, 400),
             # Reject the declared size before upload; unread large payloads can
@@ -69,6 +72,22 @@ class CenterHttpTests(unittest.TestCase):
             with self.subTest(expected=expected, prefix=body[:40]):
                 status, _, _ = self.request("POST", "/api/center/v1/requests", body, headers)
                 self.assertEqual(status, expected)
+        self.runtime.create_request.assert_not_called()
+
+    def test_ambiguous_framing_and_non_ascii_lengths_are_rejected_before_parsing(self):
+        for headers in ((('Transfer-Encoding', ''), ('Content-Length', '2')),
+                        (('Content-Length', '2'), ('Content-Length', '2')),
+                        *(tuple([('Content-Length', value)]) for value in ('+2', '2_0', '２', '2,2', '-1'))):
+            with self.subTest(headers=headers):
+                handler = object.__new__(center_server.CenterHandler)
+                handler.headers = Message()
+                handler.headers['Content-Type'] = 'application/json'
+                for key, value in headers:
+                    handler.headers[key] = value
+                handler.rfile = io.BytesIO(b'{}')
+                with self.assertRaises(center_server.CenterError):
+                    handler.read_body()
+                self.assertEqual(handler.rfile.tell(), 0)
         self.runtime.create_request.assert_not_called()
 
     def test_accepted_request_keeps_queued_state_and_envelope(self):
@@ -141,6 +160,136 @@ class CenterHttpTests(unittest.TestCase):
         status, _, _ = self.request("POST", "/api/action/start", "{}")
         self.assertEqual(status, 404)
         self.runtime.create_request.assert_not_called()
+
+    def test_catalog_revision_types_are_rejected_at_the_real_http_write_boundary(self):
+        import shutil
+        from test_center_catalog import CenterCatalogTests
+        fixture = CenterCatalogTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.cycle()
+        item, = fixture.import_root()
+        moved = fixture.base / 'moved'
+        shutil.copytree(fixture.root, moved)
+        candidate = fixture.catalog.probe({'root': str(moved)})
+        self.catalog.entry_action.side_effect = fixture.catalog.entry_action
+        self.catalog.reconnect.side_effect = fixture.catalog.reconnect
+        for endpoint, extra in (
+            (f"/entries/{item['entryId']}/archive", {}),
+            (f"/sources/{item['sourceId']}/reconnect", {'candidateId': candidate['candidateId'], 'candidateHash': candidate['candidateHash'], 'idempotencyKey': 'http-reconnect'}),
+        ):
+            before = fixture.catalog_snapshot()
+            for revision in (True, 1.0):
+                status, raw, _ = self.request('POST', '/api/center/v1' + endpoint, json.dumps({**extra, 'expectedRevision': revision}))
+                self.assertEqual(status, 400, raw)
+                self.assertEqual(json.loads(raw)['code'], 'INVALID_REQUEST')
+                self.assertEqual(fixture.catalog_snapshot(), before)
+            status, raw, _ = self.request('POST', '/api/center/v1' + endpoint, json.dumps({**extra, 'expectedRevision': 1}))
+            self.assertEqual(status, 200, raw)
+            self.assertEqual(json.loads(raw)['data']['revision'], 2)
+
+    def test_request_revision_types_do_not_reach_admission_or_preparation_over_http(self):
+        from test_center_runtime import QueueTests
+        fixture = QueueTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.runtime.create_request.side_effect = fixture.runtime.create_request
+        self.runtime.create_exploration.side_effect = fixture.runtime.create_exploration
+        request_body = {'entryId': fixture.a['entryId'], 'sourceId': fixture.a['sourceId'], 'runtimeId': fixture.a['runtimeId'], 'expectedSourceRevision': 1}
+        before = fixture.snapshot_records()
+        with mock.patch.object(fixture.runtime, '_worker') as worker, mock.patch.object(fixture.adapter, 'query', wraps=fixture.adapter.query) as query:
+            for path, field, base in (('/requests', 'expectedSourceRevision', request_body),
+                                      ('/requests', 'configRevision', request_body),
+                                      ('/explorations', 'configRevision', {})):
+                for value in (True, 1.0):
+                    body = {**base, 'idempotencyKey': 'http-revision-guard', field: value}
+                    status, raw, _ = self.request('POST', '/api/center/v1' + path, json.dumps(body))
+                    self.assertEqual(status, 400, raw)
+                    self.assertEqual(json.loads(raw)['code'], 'INVALID_REQUEST')
+                    self.assertEqual(fixture.snapshot_records(), before)
+            worker.assert_not_called()
+            query.assert_not_called()
+        self.assertEqual(fixture.adapter.launched, [])
+
+
+    def test_import_shape_errors_are_client_errors_not_retryable_server_failures(self):
+        from test_center_catalog import CenterCatalogTests
+        fixture = CenterCatalogTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.cycle()
+        candidate = fixture.catalog.probe({'root': str(fixture.root)})
+        self.catalog.probe.side_effect = fixture.catalog.probe
+        self.catalog.commit.side_effect = fixture.catalog.commit
+        base = {'candidateId': candidate['candidateId'], 'candidateHash': candidate['candidateHash'], 'idempotencyKey': 'http-import-shape'}
+        before = (fixture.store.revision, fixture.store._connection.execute('SELECT kind, id, body FROM records ORDER BY kind, id').fetchall(), fixture.hashes())
+        for path, body in (('/imports/probe', {'root': str(fixture.root), 'kindHint': {}}),
+                           ('/imports/commit', {**base, 'mode': []}),
+                           ('/imports/commit', {**base, 'itemIds': [{}]})):
+            status, raw, _ = self.request('POST', '/api/center/v1' + path, json.dumps(body))
+            result = json.loads(raw)
+            self.assertEqual(status, 400, raw)
+            self.assertEqual(result['code'], 'INVALID_INPUT')
+            self.assertFalse(result['retryable'])
+            self.assertEqual((fixture.store.revision, fixture.store._connection.execute('SELECT kind, id, body FROM records ORDER BY kind, id').fetchall(), fixture.hashes()), before)
+        self.runtime.create_request.assert_not_called()
+        self.runtime.create_exploration.assert_not_called()
+
+
+    def test_runtime_enum_shape_errors_are_not_retryable_server_errors(self):
+        from test_center_runtime import QueueTests
+        fixture = QueueTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.runtime.create_request.side_effect = fixture.runtime.create_request
+        self.runtime.create_exploration.side_effect = fixture.runtime.create_exploration
+        self.runtime.preferences.side_effect = fixture.runtime.preferences
+        body = {'idempotencyKey': 'http-enum-request', 'entryId': fixture.a['entryId'], 'sourceId': fixture.a['sourceId'], 'expectedSourceRevision': 1}
+        before = fixture.snapshot_records()
+        with mock.patch.object(fixture.runtime, '_worker') as worker:
+            for path, request, code in (
+                ('/requests', {**body, 'kind': {}}, 'INVALID_REQUEST'),
+                ('/requests', {**body, 'executionMode': []}, 'INVALID_REQUEST'),
+                ('/requests', {**body, 'config': {'engine': {}}}, 'INVALID_CONFIG'),
+                ('/explorations', {'idempotencyKey': 'http-enum-explore', 'executionMode': {}}, 'INVALID_REQUEST'),
+                ('/explorations', {'idempotencyKey': 'http-enum-explore', 'config': {'effort': []}}, 'INVALID_CONFIG'),
+                ('/preferences', {'idempotencyKey': 'http-enum-preference', 'preferences': {'language': []}}, 'INVALID_PREFERENCE'),
+            ):
+                status, raw, _ = self.request('POST', '/api/center/v1' + path, json.dumps(request))
+                result = json.loads(raw)
+                self.assertEqual(status, 400, raw); self.assertEqual(result['code'], code); self.assertFalse(result['retryable'])
+                self.assertEqual(fixture.snapshot_records(), before)
+            worker.assert_not_called()
+        self.assertEqual(fixture.adapter.launched, [])
+
+
+    def test_request_id_container_errors_never_fall_back_or_start_work_over_http(self):
+        from test_center_runtime import QueueTests
+        fixture = QueueTests(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        self.runtime.create_request.side_effect = fixture.runtime.create_request
+        body = {'idempotencyKey': 'http-id-shapes', 'entryId': fixture.a['entryId'], 'sourceId': fixture.a['sourceId'], 'runtimeId': fixture.a['runtimeId'], 'expectedSourceRevision': 1}
+        before = fixture.snapshot_records()
+        for field, value in (('entryId', []), ('sourceId', {}), ('sourceId', ['other']), ('runtimeId', [])):
+            status, raw, _ = self.request('POST', '/api/center/v1/requests', json.dumps({**body, field: value}))
+            result = json.loads(raw)
+            self.assertEqual(status, 400, raw); self.assertEqual(result['code'], 'INVALID_REQUEST'); self.assertFalse(result['retryable'])
+            self.assertEqual(fixture.snapshot_records(), before)
+        self.assertEqual(fixture.adapter.launched, [])
+
+    def test_catalog_id_containers_are_client_errors_over_http(self):
+        from test_center_catalog import CenterCatalogTests
+        fixture = CenterCatalogTests(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        fixture.cycle(); item, = fixture.import_root()
+        self.catalog.commit.side_effect = fixture.catalog.commit
+        self.catalog.entry_action.side_effect = fixture.catalog.entry_action
+        before = (fixture.store.revision, fixture.store._connection.execute('SELECT kind, id, body FROM records ORDER BY kind, id').fetchall())
+        for path, body in (('/imports/commit', {'candidateId': []}),
+                           (f"/entries/{item['entryId']}/source-selection", {'expectedRevision': 1, 'sourceId': {}})):
+            status, raw, _ = self.request('POST', '/api/center/v1' + path, json.dumps(body))
+            result = json.loads(raw)
+            self.assertEqual(status, 400, raw); self.assertEqual(result['code'], 'INVALID_INPUT'); self.assertFalse(result['retryable'])
+            self.assertEqual((fixture.store.revision, fixture.store._connection.execute('SELECT kind, id, body FROM records ORDER BY kind, id').fetchall()), before)
+
 
     def test_non_loopback_rejected_before_state_creation(self):
         with self.assertRaises(ValueError):

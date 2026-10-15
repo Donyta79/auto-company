@@ -37,6 +37,7 @@ function installModal(original: HTMLElement, sheet = false) {
   const root = ownRoot(host);
   let open = false;
   let returnFocus: HTMLElement | null = null;
+  let queueOrigin = false;
   let content: HTMLDivElement | null = null;
   let exiting: { surface: HTMLElement; slot: HTMLElement; overlay: HTMLElement | null } | null = null;
   let revision = 0;
@@ -80,7 +81,10 @@ function installModal(original: HTMLElement, sheet = false) {
     const overlayOpacity = liveOverlay ? getComputedStyle(liveOverlay).opacity : '1';
     const resuming = next && Boolean(exiting);
     if (next) parkExit();
-    if (next && !resuming) returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (next && !resuming) {
+      returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      queueOrigin = Boolean(returnFocus?.closest('[data-dialog-id="queueDrawer"]'));
+    }
     entrance = next && !quiet() && !instant ? { visual } : null;
     open = next;
     flushSync(render);
@@ -147,7 +151,11 @@ function installModal(original: HTMLElement, sheet = false) {
       onCloseAutoFocus: (event: Event) => {
         event.preventDefault();
         const replacement = returnFocus?.dataset.focusKey ? [...document.querySelectorAll<HTMLElement>("[data-focus-key]")].find(node => node.dataset.focusKey === returnFocus?.dataset.focusKey) : null;
-        const target = returnFocus?.isConnected ? returnFocus : replacement || document.querySelector<HTMLElement>("#catalogHeading, #mainContent");
+        const available = (node: HTMLElement | null | undefined) => Boolean(node?.isConnected && !node.matches(":disabled") && !node.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]') && node.getClientRects().length);
+        const drawer = document.getElementById("queueDrawer") as ModalElement | null;
+        const candidates = queueOrigin && !drawer?.open ? [document.getElementById("queueNavButton")]
+          : [returnFocus, replacement, queueOrigin ? document.getElementById("closeQueueButton") : null];
+        const target = candidates.find(available) || [document.getElementById("productSearch"), document.getElementById("catalogHeading"), document.getElementById("mainContent")].find(available);
         if (target) { if (!target.matches("button,a,input,select,textarea,[tabindex]")) target.tabIndex = -1; target.focus({ preventScroll: true }); }
       },
     };

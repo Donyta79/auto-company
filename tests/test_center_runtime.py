@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -121,6 +122,194 @@ class QueueTests(unittest.TestCase):
     def enable(self):
         self.runtime.queue_action("resume", {"idempotencyKey": "resume-aaaa"})
 
+    def test_source_revision_rejects_noninteger_inputs_before_preflight(self):
+        before = self.snapshot_records()
+        with patch.object(self.adapter, 'query', wraps=self.adapter.query) as query:
+            for value in (True, 1.0, False, '1', [], {}, 1e100, -1, 2**100):
+                with self.assertRaises(CenterError) as error:
+                    self.create(key='source-type-guard', expectedSourceRevision=value)
+                self.assertEqual((error.exception.code, error.exception.status), ('INVALID_REQUEST', 400), value)
+                self.assertEqual(self.snapshot_records(), before)
+            query.assert_not_called()
+        self.assertEqual(self.create(key='source-type-guard')['state'], 'queued')
+        self.assertEqual(self.adapter.launched, [])
+
+    def test_source_revision_required_integer_conflicts_and_replay_order(self):
+        body = {'idempotencyKey': 'source-revision-replay', 'entryId': self.a['entryId'], 'sourceId': self.a['sourceId'], 'runtimeId': self.a['runtimeId']}
+        before = self.snapshot_records()
+        for revision in ({}, {'expectedSourceRevision': None}, {'expectedSourceRevision': 0}, {'expectedSourceRevision': 2}):
+            with self.assertRaises(CenterError) as error:
+                self.runtime.create_request({**body, **revision})
+            self.assertEqual(error.exception.code, 'SOURCE_CHANGED', revision)
+            self.assertEqual(self.snapshot_records(), before)
+        body['expectedSourceRevision'] = 1
+        created = self.runtime.create_request(body)
+        with self.store.transaction() as tx:
+            source = tx.get('sources', self.a['sourceId']); source['sourceRevision'] = 2; tx.put('sources', source['sourceId'], source)
+        before = self.snapshot_records()
+        self.assertEqual(self.runtime.create_request(body)['requestId'], created['requestId'])
+        self.assertEqual(self.snapshot_records(), before)
+        for value in (2, True):
+            with self.assertRaises(CenterError) as error:
+                self.runtime.create_request({**body, 'expectedSourceRevision': value})
+            self.assertEqual(error.exception.code, 'IDEMPOTENCY_CONFLICT')
+            self.assertEqual(self.snapshot_records(), before)
+
+    def test_config_revision_rejects_nonintegers_before_queue_or_preparation(self):
+        before = self.snapshot_records()
+        with patch.object(self.runtime, '_worker') as worker, patch.object(self.adapter, 'query', wraps=self.adapter.query) as query:
+            for value in (True, 1.0, False, '1', [], {}, 1e100, -1, 2**100):
+                for create in (lambda: self.create(key='config-type-request', configRevision=value),
+                               lambda: self.runtime.create_exploration({'idempotencyKey': 'config-type-exploration', 'configRevision': value})):
+                    with self.assertRaises(CenterError) as error:
+                        create()
+                    self.assertEqual((error.exception.code, error.exception.status), ('INVALID_REQUEST', 400), value)
+                    self.assertEqual(self.snapshot_records(), before)
+            worker.assert_not_called(); query.assert_not_called()
+        self.assertEqual(self.adapter.launched, [])
+
+    def test_config_revision_optional_and_integer_conflict_contract(self):
+        before = self.snapshot_records()
+        with patch.object(self.runtime, '_worker') as worker:
+            for value in (0, 2):
+                for create in (lambda: self.create(key='config-stale-request', configRevision=value),
+                               lambda: self.runtime.create_exploration({'idempotencyKey': 'config-stale-exploration', 'configRevision': value})):
+                    with self.assertRaises(CenterError) as error:
+                        create()
+                    self.assertEqual(error.exception.code, 'REVISION_CONFLICT', value)
+                    self.assertEqual(self.snapshot_records(), before)
+            worker.assert_not_called()
+            for index, revision in enumerate(({}, {'configRevision': None}, {'configRevision': 1})):
+                source = self.source('config-' + str(index))
+                current_revision = self.runtime.preferences()['revision']
+                if revision.get('configRevision') is not None:
+                    revision = {'configRevision': current_revision}
+                request = self.create(source, key='config-valid-request-' + str(index), **revision)
+                self.assertEqual(request['config']['configRevision'], current_revision)
+                current_revision = self.runtime.preferences()['revision']
+                if revision.get('configRevision') is not None:
+                    revision = {'configRevision': current_revision}
+                operation = self.runtime.create_exploration({'idempotencyKey': 'config-valid-exploration-' + str(index), **revision})
+                self.assertEqual(operation['input']['config']['configRevision'], current_revision)
+            self.assertEqual(worker.call_count, 3)
+        self.assertEqual(self.adapter.launched, [])
+
+    def test_config_revision_legal_replay_precedes_changed_defaults(self):
+        body = {'idempotencyKey': 'config-replay', 'entryId': self.a['entryId'], 'sourceId': self.a['sourceId'], 'expectedSourceRevision': 1, 'configRevision': 1}
+        request = self.runtime.create_request(body)
+        with self.store.transaction() as tx:
+            preferences = tx.get('preferences', 'main'); preferences['revision'] = 2; tx.put('preferences', 'main', preferences)
+        before = self.snapshot_records()
+        self.assertEqual(self.runtime.create_request(body)['requestId'], request['requestId'])
+        self.assertEqual(self.snapshot_records(), before)
+        with self.assertRaises(CenterError) as error:
+            self.runtime.create_request({**body, 'configRevision': True})
+        self.assertEqual(error.exception.code, 'IDEMPOTENCY_CONFLICT')
+        self.assertEqual(self.snapshot_records(), before)
+
+
+    def test_request_mode_and_kind_shapes_fail_without_queue_or_preparation(self):
+        before = self.snapshot_records()
+        with patch.object(self.runtime, '_worker') as worker:
+            for value in ({}, [], True, 1, None, 'unsupported'):
+                for field in ('kind', 'executionMode'):
+                    with self.assertRaises(CenterError) as error:
+                        self.create(key='enum-request', **{field: value})
+                    self.assertEqual((error.exception.code, error.exception.status), ('INVALID_REQUEST', 400))
+                    self.assertEqual(self.snapshot_records(), before)
+                with self.assertRaises(CenterError) as error:
+                    self.runtime.create_exploration({'idempotencyKey': 'enum-exploration', 'executionMode': value})
+                self.assertEqual((error.exception.code, error.exception.status), ('INVALID_REQUEST', 400))
+                self.assertEqual(self.snapshot_records(), before)
+            worker.assert_not_called()
+        self.assertEqual(self.adapter.launched, [])
+
+    def test_configuration_and_preference_enum_shapes_fail_without_writes(self):
+        before = self.snapshot_records()
+        with patch.object(self.runtime, '_worker') as worker:
+            for value in ({}, [], True, 1, None, ''):
+                for field in ('engine', 'effort', 'productLanguage'):
+                    for create in (lambda: self.create(key='enum-config-request', config={field: value}),
+                                   lambda: self.runtime.create_exploration({'idempotencyKey': 'enum-config-explore', 'config': {field: value}})):
+                        with self.assertRaises(CenterError) as error:
+                            create()
+                        self.assertEqual((error.exception.code, error.exception.status), ('INVALID_CONFIG', 400))
+                        self.assertEqual(self.snapshot_records(), before)
+                for field in ('language', 'engine', 'effort', 'productLanguage'):
+                    with self.assertRaises(CenterError) as error:
+                        self.runtime.preferences({'idempotencyKey': 'enum-preferences', 'preferences': {field: value}})
+                    self.assertEqual((error.exception.code, error.exception.status), ('INVALID_PREFERENCE', 400))
+                    self.assertEqual(self.snapshot_records(), before)
+            worker.assert_not_called()
+        self.assertEqual(self.adapter.launched, [])
+
+    def test_supported_configuration_strings_remain_valid(self):
+        values = {'engine': ('claude', 'codex', 'cursor', 'openai-compatible'),
+                  'effort': ('low', 'medium', 'high', 'xhigh', 'minimal', 'none'),
+                  'productLanguage': ('en', 'zh-CN')}
+        for field, choices in values.items():
+            for index, value in enumerate(choices):
+                self.assertEqual(self.runtime._config({'config': {field: value}})[field], value)
+                result = self.runtime.preferences({'idempotencyKey': 'supported-' + field + '-' + str(index), 'preferences': {field: value}})
+                self.assertEqual(result[field], value)
+        for index, language in enumerate(('en', 'zh-CN')):
+            self.assertEqual(self.runtime.preferences({'idempotencyKey': 'supported-language-' + str(index), 'preferences': {'language': language}})['language'], language)
+        self.assertEqual(self.adapter.launched, [])
+
+    def test_request_id_shapes_cannot_choose_default_source_or_reach_preflight(self):
+        before = self.snapshot_records()
+        with patch.object(self.adapter, 'query', wraps=self.adapter.query) as query:
+            for field in ('entryId', 'sourceId', 'runtimeId'):
+                for value in ({}, [], ['other'], True, False, 0, 1.0):
+                    with self.assertRaises(CenterError) as error:
+                        self.create(key='request-id-shape', **{field: value})
+                    self.assertEqual((error.exception.code, error.exception.status), ('INVALID_REQUEST', 400), (field, value))
+                    self.assertEqual(self.snapshot_records(), before)
+            query.assert_not_called()
+        self.assertEqual(self.create(key='request-id-shape')['state'], 'queued')
+        self.assertEqual(self.adapter.launched, [])
+
+    def test_optional_source_and_runtime_ids_keep_omission_null_and_empty_rules(self):
+        for index, fields in enumerate(({}, {'sourceId': None, 'runtimeId': None}, {'sourceId': '', 'runtimeId': None})):
+            source = self.source('optional-' + str(index))
+            body = {'idempotencyKey': 'optional-ids-' + str(index), 'entryId': source['entryId'], 'expectedSourceRevision': 1, **fields}
+            request = self.runtime.create_request(body)
+            self.assertEqual((request['sourceId'], request['runtimeId']), (source['sourceId'], source['runtimeId']))
+            before = self.snapshot_records()
+            self.assertEqual(self.runtime.create_request(body)['requestId'], request['requestId'])
+            self.assertEqual(self.snapshot_records(), before)
+        before = self.snapshot_records()
+        for identity in ('', 'unknown'):
+            with self.assertRaises(CenterError) as error:
+                self.create(self.b, key='runtime-id-conflict', runtimeId=identity)
+            self.assertEqual(error.exception.code, 'SOURCE_CHANGED')
+            self.assertEqual(self.snapshot_records(), before)
+
+    def test_dispatch_id_shapes_do_not_write_stop_intent(self):
+        request = self.create()
+        with self.store.transaction() as tx:
+            row = tx.get('requests', request['requestId']); row.update(state='running', dispatchId='dispatch-fixture'); tx.put('requests', row['requestId'], row)
+        before = self.snapshot_records()
+        with patch.object(self.runtime, '_write_controls') as controls:
+            for value in ({}, [], True, 0, 1.0):
+                with self.assertRaises(CenterError) as error:
+                    self.runtime.request_action(request['requestId'], 'stop', {'idempotencyKey': 'stop-id-shape', 'expectedDispatchId': value})
+                self.assertEqual((error.exception.code, error.exception.status), ('INVALID_REQUEST', 400))
+                self.assertEqual(self.snapshot_records(), before)
+            for value in ('', 'wrong-dispatch'):
+                with self.assertRaises(CenterError) as error:
+                    self.runtime.request_action(request['requestId'], 'stop', {'idempotencyKey': 'stop-id-shape', 'expectedDispatchId': value})
+                self.assertEqual(error.exception.code, 'DISPATCH_CONFLICT')
+                self.assertEqual(self.snapshot_records(), before)
+            controls.assert_not_called()
+            stopped = self.runtime.request_action(request['requestId'], 'stop', {'idempotencyKey': 'stop-id-shape', 'expectedDispatchId': None})
+            self.assertEqual(stopped['state'], 'stopping')
+            controls.assert_called_once()
+            before = self.snapshot_records()
+            self.assertEqual(self.runtime.request_action(request['requestId'], 'stop', {'idempotencyKey': 'stop-id-shape', 'expectedDispatchId': None})['state'], 'stopping')
+            self.assertEqual(self.snapshot_records(), before)
+        self.assertEqual(self.adapter.launched, [])
+
     def test_idempotency_and_single_open_request_with_two_threads(self):
         rows, errors = [], []
         def create():
@@ -142,6 +331,139 @@ class QueueTests(unittest.TestCase):
             self.create(key="different-key")
         self.assertEqual(caught.exception.code, "OPEN_REQUEST_EXISTS")
         self.assertEqual(len(self.runtime.list_requests()["items"]), 1)
+
+    def snapshot_records(self):
+        return (self.store.revision, self.store._connection.execute(
+            "SELECT kind, id, body FROM records ORDER BY kind, id").fetchall())
+
+    def test_queue_order_rejects_malformed_ids_without_mutation(self):
+        first, second = self.create(), self.create(self.b, "order-second")
+        ids = [second["requestId"], first["requestId"]]
+        before = self.snapshot_records()
+        for ordered in (None, {}, "request", [{}], [[]], [True], [1], [None], [ids[0], {}]):
+            with self.subTest(ordered=ordered):
+                with self.assertRaises(CenterError) as caught:
+                    self.runtime.queue_action("order", {"idempotencyKey": "malformed-order", "requestIds": ordered})
+                self.assertEqual((caught.exception.code, caught.exception.status), ("INVALID_REQUEST", 400))
+                self.assertEqual(self.snapshot_records(), before)
+        for ordered in ([], ids[:1], [ids[0], ids[0]], [ids[0], "request_missing"]):
+            with self.subTest(ordered=ordered):
+                with self.assertRaises(CenterError) as caught:
+                    self.runtime.queue_action("order", {"idempotencyKey": "malformed-order", "requestIds": ordered})
+                self.assertEqual((caught.exception.code, caught.exception.status), ("REVISION_CONFLICT", 409))
+                self.assertEqual(self.snapshot_records(), before)
+        self.runtime.queue_action("order", {"idempotencyKey": "malformed-order", "requestIds": ids})
+        self.assertEqual([row["requestId"] for row in self.runtime.list_requests()["items"]], ids)
+
+    def test_expected_revision_rejects_nonintegers_without_mutation(self):
+        request = self.create(executionMode="start_now")
+        before = self.snapshot_records()
+        for expected in (True, False, 1.0, "1", [], {}):
+            for action in ("resume", "pause", "cancel"):
+                with self.subTest(expected=expected, action=action):
+                    body = {"idempotencyKey": "invalid-revision", "expectedRevision": expected}
+                    with self.assertRaises(CenterError) as caught:
+                        if action == "cancel":
+                            self.runtime.request_action(request["requestId"], action, body)
+                        else:
+                            self.runtime.queue_action(action, body)
+                    self.assertEqual((caught.exception.code, caught.exception.status), ("INVALID_REQUEST", 400))
+                    self.assertEqual(self.snapshot_records(), before)
+        self.runtime.queue_action("pause", {"idempotencyKey": "valid-revision", "expectedRevision": 1})
+        # Omitted/null revisions remain optional; their existing callers still work.
+        self.runtime.queue_action("resume", {"idempotencyKey": "omitted-revision"})
+        self.runtime.queue_action("pause", {"idempotencyKey": "null-revision", "expectedRevision": None})
+        self.runtime.request_action(request["requestId"], "cancel", {
+            "idempotencyKey": "valid-cancel", "expectedRevision": self.runtime.get_request(request["requestId"])["revision"]})
+        self.assertEqual(self.runtime.get_request(request["requestId"])["state"], "canceled")
+
+    def test_queue_and_cancel_conflicts_and_replays_do_not_mutate(self):
+        first, second = self.create(), self.create(self.b, "conflict-second")
+        ids = [second["requestId"], first["requestId"]]
+        order = {"idempotencyKey": "order-once", "requestIds": ids, "expectedRevision": 1}
+        self.runtime.queue_action("order", order)
+        before = self.snapshot_records()
+        for action, body in (("order", {**order, "idempotencyKey": "stale-order"}),
+                             ("pause", {"idempotencyKey": "stale-pause", "expectedRevision": 1}),
+                             ("cancel", {"idempotencyKey": "stale-cancel", "expectedRevision": 1})):
+            with self.subTest(action=action):
+                with self.assertRaises(CenterError) as caught:
+                    if action == "cancel":
+                        self.runtime.request_action(first["requestId"], action, body)
+                    else:
+                        self.runtime.queue_action(action, body)
+                self.assertEqual(caught.exception.code, "REVISION_CONFLICT")
+                self.assertEqual(self.snapshot_records(), before)
+        self.runtime.queue_action("order", order)
+        self.assertEqual(self.snapshot_records(), before)
+        with self.assertRaises(CenterError) as caught:
+            self.runtime.queue_action("order", {**order, "requestIds": list(reversed(ids))})
+        self.assertEqual(caught.exception.code, "IDEMPOTENCY_CONFLICT")
+        self.assertEqual(self.snapshot_records(), before)
+        cancel = {"idempotencyKey": "cancel-once", "expectedRevision": 2}
+        self.runtime.request_action(first["requestId"], "cancel", cancel)
+        pause = {"idempotencyKey": "pause-once", "expectedRevision": 2}
+        self.runtime.queue_action("pause", pause)
+        after = self.snapshot_records()
+        self.runtime.request_action(first["requestId"], "cancel", cancel)
+        self.runtime.queue_action("pause", pause)
+        self.assertEqual(self.snapshot_records(), after)
+
+    def test_sqlite_failure_rolls_back_order_pause_and_cancel_with_retry(self):
+        first = self.create(executionMode="start_now")
+        second = self.create(self.b, "rollback-second")
+        for action in ("order", "pause", "cancel"):
+            with self.subTest(action=action):
+                body = {"idempotencyKey": "rollback-" + action}
+                if action == "order":
+                    body["requestIds"] = [second["requestId"], first["requestId"]]
+                before = self.snapshot_records()
+                self.store._connection.execute("""CREATE TEMP TRIGGER fail_remember
+                    AFTER INSERT ON records WHEN NEW.kind = 'idempotency'
+                    BEGIN SELECT RAISE(ABORT, 'injected idempotency write failure'); END""")
+                try:
+                    with patch.object(self.runtime, "_write_controls") as write_controls:
+                        with self.assertRaises(sqlite3.IntegrityError):
+                            if action == "cancel":
+                                self.runtime.request_action(first["requestId"], action, body)
+                            else:
+                                self.runtime.queue_action(action, body)
+                        write_controls.assert_not_called()
+                    self.assertEqual(self.snapshot_records(), before)
+                finally:
+                    self.store._connection.execute("DROP TRIGGER fail_remember")
+                if action == "cancel":
+                    self.runtime.request_action(first["requestId"], action, body)
+                    self.assertEqual(self.runtime.get_request(first["requestId"])["state"], "canceled")
+                else:
+                    self.runtime.queue_action(action, body)
+                    if action == "order":
+                        self.assertEqual(self.runtime.get_request(second["requestId"])["order"], 0)
+                    else:
+                        self.assertFalse(self.runtime.get_request(first["requestId"])["startAuthorized"])
+                self.assertEqual(self.adapter.launched, [])
+
+    def test_reopened_store_retains_idempotency_but_revokes_unclaimed_start(self):
+        request = self.create(executionMode="start_now")
+        self.enable()
+        self.store.close()
+        self.store = CenterStore(self.folder / "center")
+        self.addCleanup(self.store.close)
+        self.catalog = FakeCatalog(self.store)
+        self.adapter = FakeAdapter()
+        self.runtime = CenterRuntime(self.store, self.catalog, ROOT, {"platform": "posix"}, adapter=self.adapter)
+        before = self.snapshot_records()
+        repeated = self.create(executionMode="start_now")
+        self.assertEqual(repeated["requestId"], request["requestId"])
+        self.assertFalse(repeated["startAuthorized"])
+        self.enable()  # A replay of the old resume intent cannot authorize a new session.
+        self.assertEqual(self.snapshot_records(), before)
+        self.runtime.tick()
+        self.assertFalse(self.runtime.summary()["dispatchEnabled"])
+        self.assertEqual(self.adapter.launched, [])
+        self.runtime.queue_action("resume", {"idempotencyKey": "new-session-resume"})
+        self.runtime.tick()
+        self.assertEqual(len(self.adapter.launched), 1)
 
     def test_fifo_holds_whole_lifetime_pause_and_stop_all(self):
         first = self.create()
@@ -1053,6 +1375,7 @@ if [ "$count" -ge "${STOP_AFTER:-2}" ]; then touch "$AUTONOMOUS_COMPANY_ROOT/.au
         self.assertEqual(duplicate.returncode, 78)
         self.assertEqual((self.root / "invocations").read_text().strip(), "2")
 
+
     def test_original_guard_p1_wait_is_reported_without_stopping_or_releasing_slot(self):
         process = self.launch(ADD_P1="1", STOP_AFTER="99", LOOP_INTERVAL="1")
         receipt_path = self.control / "receipt.json"
@@ -1141,6 +1464,7 @@ if [ "$count" -ge "${STOP_AFTER:-2}" ]; then touch "$AUTONOMOUS_COMPANY_ROOT/.au
         self.assertFalse(marker_path.exists())
         self.assertEqual(consensus.read_bytes(), data)
         self.assertFalse((self.root / ".auto-loop-paused").exists())
+
 
     def test_competing_runner_and_owned_stop_preserve_unrelated_sentinel(self):
         sentinel = subprocess.Popen(["sleep", "60"])

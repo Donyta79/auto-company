@@ -824,6 +824,173 @@ class CenterCatalogTests(unittest.TestCase):
         self.catalog.refresh_changed_sources()
         self.assertIsNone(self.catalog.get_entry(item['entryId'])['iconUrl'])
 
+    def catalog_snapshot(self):
+        with self.store.transaction() as tx:
+            records = {kind: tx.list(kind) for kind in ('entries', 'sources', 'candidates', 'events', 'operations', 'requests', 'runtimes', 'idempotency')}
+        return self.store.revision, records, self.hashes()
+
+    def test_entry_actions_reject_noninteger_revisions_without_mutation(self):
+        self.cycle()
+        item, = self.import_root()
+        for action in ('archive', 'restore', 'detach', 'source-selection'):
+            for value in (True, 1.0, False, '1', [], {}, 1e100, -1, 2**100):
+                before = self.catalog_snapshot()
+                with self.assertRaises(CenterError) as error:
+                    self.catalog.entry_action(item['entryId'], action, {'expectedRevision': value, 'sourceId': item['sourceId']})
+                self.assertEqual((error.exception.code, error.exception.status), ('INVALID_REQUEST', 400), (action, value))
+                self.assertEqual(self.catalog_snapshot(), before, (action, value))
+
+    def test_entry_revision_conflicts_and_valid_integers_keep_existing_contract(self):
+        self.cycle()
+        item, = self.import_root()
+        for body in ({}, {'expectedRevision': None}, {'expectedRevision': 0}, {'expectedRevision': 2}):
+            before = self.catalog_snapshot()
+            with self.assertRaises(CenterError) as error:
+                self.catalog.entry_action(item['entryId'], 'archive', body)
+            self.assertEqual(error.exception.code, 'REVISION_CONFLICT', body)
+            self.assertEqual(self.catalog_snapshot(), before)
+        archived = self.catalog.entry_action(item['entryId'], 'archive', {'expectedRevision': 1})
+        self.assertTrue(archived['archived'])
+        self.assertEqual(archived['revision'], 2)
+        before = self.catalog_snapshot()
+        with self.assertRaises(CenterError) as error:
+            self.catalog.entry_action(item['entryId'], 'restore', {'expectedRevision': 1})
+        self.assertEqual(error.exception.code, 'REVISION_CONFLICT')
+        self.assertEqual(self.catalog_snapshot(), before)
+        restored = self.catalog.entry_action(item['entryId'], 'restore', {'expectedRevision': 2})
+        self.assertFalse(restored['archived'])
+        self.assertEqual(restored['revision'], 3)
+        selected = self.catalog.entry_action(item['entryId'], 'source-selection', {'expectedRevision': 3, 'sourceId': item['sourceId']})
+        self.assertEqual(selected['preferredSourceId'], item['sourceId'])
+        self.assertEqual(selected['revision'], 4)
+        detached = self.catalog.entry_action(item['entryId'], 'detach', {'expectedRevision': 4})
+        self.assertTrue(detached['detached'])
+        self.assertEqual(detached['revision'], 5)
+
+    def test_reconnect_rejects_noninteger_revisions_without_catalog_or_audit_writes(self):
+        self.cycle()
+        item, = self.import_root()
+        backup = self.base / 'moved'
+        shutil.copytree(self.root, backup)
+        candidate = self.catalog.probe({'root': str(backup)})
+        base_body = {'candidateId': candidate['candidateId'], 'candidateHash': candidate['candidateHash'], 'idempotencyKey': 'revision-guard'}
+        for value in (True, 1.0, False, '1', [], {}, 1e100, -1, 2**100):
+            before = self.catalog_snapshot()
+            with self.assertRaises(CenterError) as error:
+                self.catalog.reconnect(item['sourceId'], {**base_body, 'expectedRevision': value})
+            self.assertEqual((error.exception.code, error.exception.status), ('INVALID_REQUEST', 400), value)
+            self.assertEqual(self.catalog_snapshot(), before, value)
+        # Rejected input did not reserve the key; correcting it can succeed.
+        result = self.catalog.reconnect(item['sourceId'], {**base_body, 'expectedRevision': 1})
+        self.assertEqual(result['root'], str(backup.resolve()))
+
+    def test_reconnect_required_revision_and_idempotent_replay_order_are_preserved(self):
+        self.cycle()
+        item, = self.import_root()
+        backup = self.base / 'moved'
+        shutil.copytree(self.root, backup)
+        candidate = self.catalog.probe({'root': str(backup)})
+        base_body = {'candidateId': candidate['candidateId'], 'candidateHash': candidate['candidateHash'], 'idempotencyKey': 'reconnect-replay'}
+        for revision in ({}, {'expectedRevision': None}, {'expectedRevision': 0}, {'expectedRevision': 2}):
+            before = self.catalog_snapshot()
+            with self.assertRaises(CenterError) as error:
+                self.catalog.reconnect(item['sourceId'], {**base_body, **revision})
+            self.assertEqual(error.exception.code, 'REVISION_CONFLICT', revision)
+            self.assertEqual(self.catalog_snapshot(), before)
+        body = {**base_body, 'expectedRevision': 1}
+        result = self.catalog.reconnect(item['sourceId'], body)
+        before = self.catalog_snapshot()
+        self.assertEqual(self.catalog.reconnect(item['sourceId'], body), result)
+        self.assertEqual(self.catalog_snapshot(), before, 'valid replay must return before checking the now-stale revision')
+        for value in (2, True):
+            with self.assertRaises(CenterError) as error:
+                self.catalog.reconnect(item['sourceId'], {**body, 'expectedRevision': value})
+            self.assertEqual(error.exception.code, 'IDEMPOTENCY_CONFLICT', 'existing key/body mismatch keeps its earlier priority')
+            self.assertEqual(self.catalog_snapshot(), before)
+
+    def test_import_probe_kind_hint_rejects_wrong_shapes_without_writes(self):
+        self.cycle()
+        before = (self.store.revision, self.store._connection.execute('SELECT kind, id, body FROM records ORDER BY kind, id').fetchall(), self.hashes())
+        for hint in ({}, [], True, 1.0, 'unsupported'):
+            with self.assertRaises(CenterError) as error:
+                self.catalog.probe({'root': str(self.root), 'kindHint': hint})
+            self.assertEqual((error.exception.code, error.exception.status), ('INVALID_INPUT', 400), hint)
+            self.assertEqual((self.store.revision, self.store._connection.execute('SELECT kind, id, body FROM records ORDER BY kind, id').fetchall(), self.hashes()), before)
+        for hint in (None, 'reference'):
+            self.assertTrue(self.catalog.probe({'root': str(self.root), 'kindHint': hint})['items'])
+
+    def test_import_commit_rejects_enum_and_selection_shapes_without_writes(self):
+        self.cycle()
+        candidate = self.catalog.probe({'root': str(self.root)})
+        identity = candidate['items'][0]['itemId']
+        body = {'candidateId': candidate['candidateId'], 'candidateHash': candidate['candidateHash'], 'idempotencyKey': 'shape-retry'}
+        before = (self.store.revision, self.store._connection.execute('SELECT kind, id, body FROM records ORDER BY kind, id').fetchall(), self.hashes())
+        invalid = [('mode', value) for value in ({}, [], None, True, 1.0, 'unsupported')]
+        invalid += [('itemIds', value) for value in ([{}], [[]], [identity, {}], [None], [True], [1], [], None, identity, ['unknown'])]
+        for field, value in invalid:
+            with self.assertRaises(CenterError) as error:
+                self.catalog.commit({**body, field: value})
+            self.assertEqual((error.exception.code, error.exception.status), ('INVALID_INPUT', 400), (field, value))
+            self.assertEqual((self.store.revision, self.store._connection.execute('SELECT kind, id, body FROM records ORDER BY kind, id').fetchall(), self.hashes()), before)
+        self.assertEqual(len(self.catalog.commit(body)['items']), 1, 'invalid requests did not consume the idempotency key')
+
+    def test_import_valid_modes_selection_and_replays_keep_existing_contract(self):
+        self.cycle()
+        self.cycle('projects/two', 'second')
+        candidate = self.catalog.probe({'root': str(self.root)})
+        base = {'candidateId': candidate['candidateId'], 'candidateHash': candidate['candidateHash']}
+        for index, mode in enumerate(({}, {'mode': 'readonly'}, {'mode': 'read_only'}, {'mode': 'reference'})):
+            body = {**base, **mode, 'idempotencyKey': 'valid-mode-' + str(index)}
+            result = self.catalog.commit(body)
+            self.assertEqual(len(result['items']), 2, 'omitted selection keeps every inspected item')
+            revision = self.store.revision
+            self.assertEqual(self.catalog.commit(body), result)
+            self.assertEqual(self.store.revision, revision)
+        identity = candidate['items'][0]['itemId']
+        result = self.catalog.commit({**base, 'idempotencyKey': 'valid-subset', 'itemIds': [identity, identity]})
+        self.assertEqual(len(result['items']), 1, 'duplicate valid selections retain existing one-item behavior')
+
+
+    def test_catalog_id_shapes_do_not_fall_back_or_bind_sqlite_parameters(self):
+        self.cycle()
+        item, = self.import_root()
+        candidate = self.catalog.probe({'root': str(self.root)})
+        body = {'candidateHash': candidate['candidateHash'], 'idempotencyKey': 'catalog-id-shapes', 'expectedRevision': 1}
+        snapshot = lambda: (self.store.revision, self.store._connection.execute('SELECT kind, id, body FROM records ORDER BY kind, id').fetchall(), self.hashes())
+        before = snapshot()
+        for value in ({}, [], ['other'], True, False, 0, 1.0):
+            for call in (lambda: self.catalog.resolve_source(value),
+                         lambda: self.catalog.resolve_source(item['entryId'], value),
+                         lambda: self.catalog.commit({**body, 'candidateId': value}),
+                         lambda: self.catalog.reconnect(item['sourceId'], {**body, 'candidateId': value}),
+                         lambda: self.catalog.entry_action(item['entryId'], 'source-selection', {'expectedRevision': 1, 'sourceId': value})):
+                with self.assertRaises(CenterError) as error:
+                    call()
+                self.assertEqual((error.exception.code, error.exception.status), ('INVALID_INPUT', 400), value)
+                self.assertEqual(snapshot(), before)
+
+    def test_catalog_id_defaults_and_unknown_strings_keep_existing_rules(self):
+        self.cycle()
+        item, = self.import_root()
+        for source_id in (None, '', item['sourceId']):
+            self.assertEqual(self.catalog.resolve_source(item['entryId'], source_id)[1]['sourceId'], item['sourceId'])
+        for identity in (None, '', 'unknown'):
+            with self.assertRaises(CenterError) as error:
+                self.catalog.resolve_source(identity)
+            self.assertEqual(error.exception.code, 'ENTRY_NOT_FOUND')
+            with self.assertRaises(CenterError) as error:
+                self.catalog.commit({'candidateId': identity})
+            self.assertEqual(error.exception.code, 'CANDIDATE_INVALID')
+            with self.assertRaises(CenterError) as error:
+                self.catalog.entry_action(item['entryId'], 'source-selection', {'expectedRevision': 1, 'sourceId': identity})
+            self.assertEqual(error.exception.code, 'SOURCE_NOT_FOUND')
+        with self.assertRaises(CenterError) as error:
+            self.catalog.resolve_source(item['entryId'], 'unknown')
+        self.assertEqual(error.exception.code, 'SOURCE_NOT_FOUND')
+        selected = self.catalog.entry_action(item['entryId'], 'source-selection', {'expectedRevision': 1, 'sourceId': item['sourceId']})
+        self.assertEqual(selected['preferredSourceId'], item['sourceId'])
+
+
 
 if __name__ == '__main__':
     unittest.main()

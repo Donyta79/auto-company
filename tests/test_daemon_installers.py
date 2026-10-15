@@ -24,7 +24,7 @@ class DaemonInstallerTests(unittest.TestCase):
         self.project = root / 'Repo & "trial" %data'
         for directory in ("scripts/core", "scripts/macos", "scripts/wsl"):
             (self.project / directory).mkdir(parents=True, exist_ok=True)
-        for filename in ("scripts/core/engine-adapters.sh", "scripts/core/process-supervisor.sh", "scripts/core/launchd-config.py", "scripts/core/ui-messages.sh", "scripts/core/localization.py", "scripts/core/namespace_guard.py",
+        for filename in ("scripts/core/engine-adapters.sh", "scripts/core/log_redaction.py", "scripts/core/process-supervisor.sh", "scripts/core/launchd-config.py", "scripts/core/ui-messages.sh", "scripts/core/localization.py", "scripts/core/namespace_guard.py",
                          "scripts/macos/install-daemon.sh", "scripts/wsl/install-wsl-daemon.sh"):
             shutil.copy2(REPO / filename, self.project / filename)
         shutil.copytree(REPO / "i18n", self.project / "i18n")
@@ -57,7 +57,9 @@ class DaemonInstallerTests(unittest.TestCase):
 
     def test_mac_install_preserves_budget_and_special_paths(self):
         self.fake("uname", 'printf "Darwin\\n"')
-        self.run_installer("scripts/macos/install-daemon.sh")
+        result = self.run_installer("scripts/macos/install-daemon.sh")
+        self.assertIn("Version: fake-version", result.stdout)
+        self.assertEqual(result.stderr, "")
         raw = (self.home_dir / "Library/LaunchAgents/com.autonomouscompany.loop.plist").read_bytes()
         config = plistlib.loads(raw)
         self.assertEqual(config["WorkingDirectory"], str(self.project))

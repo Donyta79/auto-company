@@ -548,7 +548,7 @@ test('unconfirmed source status agrees across center and detail while English fi
   await expect(page.locator('#sidebarSlot')).toHaveText('No');
 });
 
-test('column controls sort globally, filter states and rounds, preserve focus, and show logo fallback', async ({ page, center }) => {
+test('column controls sort globally, filter states and rounds, preserve focus, and show logo fallback', async ({ page, center }, testInfo) => {
   await page.route('**/api/center/v1/entries?*', async route => {
     const response = await route.fetch(), payload = await response.json(), original = payload.data.items[0];
     const names = ['Zeta', 'Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon'];
@@ -602,7 +602,7 @@ test('column controls sort globally, filter states and rounds, preserve focus, a
   await expect(productSort).toBeVisible();
   await expect(round).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  const evidence = fileURLToPath(new URL('../../acceptance/2026-10-03-live-dashboard/', import.meta.url));
+  const evidence = testInfo.outputPath('fixtures');
   await mkdir(evidence, { recursive: true });
   await page.screenshot({ path: `${evidence}/center-mobile-columns-fixture.png` });
   await page.setViewportSize({ width: 1064, height: 750 });
@@ -633,7 +633,7 @@ test('center and long form obey every layout breakpoint, touch targets and enlar
     const overflow = await page.evaluate(() => ({ width: document.documentElement.scrollWidth, viewport: innerWidth, nodes: [...document.querySelectorAll('body *')].map(node => ({ tag: node.tagName, id: node.id, class: node.className, right: node.getBoundingClientRect().right })).filter(node => node.right > innerWidth && typeof node.class === 'string').slice(0, 8) }));
     expect(overflow.width <= overflow.viewport, `Center overflow at ${width}: ${JSON.stringify(overflow.nodes)}`).toBe(true);
   }
-  const evidence = fileURLToPath(new URL('../../acceptance/2026-10-03-controls/fixtures/', import.meta.url));
+  const evidence = testInfo.outputPath('fixtures');
   await mkdir(evidence, { recursive: true });
   await page.setViewportSize({ width: 1064, height: 750 });
   await page.screenshot({ path: `${evidence}/center-desktop-fixture.png` });
@@ -1065,6 +1065,7 @@ async function queueFixture(page, center, attention) {
   await page.route('**/api/center/v1/entries?*', route => send(route, { items: [entry], total: 1, nextCursor: null }));
   await page.route('**/api/center/v1/requests?*', route => send(route, { items: [request], revision: 1 }));
   await openCenter(page, center);
+  return { entry, request };
 }
 
 test('an owned attention dispatch retains stop controls', async ({ page, center }) => {
@@ -1413,4 +1414,451 @@ for (const count of [100, 1000]) test(`synthetic ${count} products use bounded l
   await expect(page.locator('.product-row')).toHaveCount(1);
   await expect(page.locator('#productSearch')).toBeFocused();
   await testInfo.attach('synthetic-list-motion.json', { body: JSON.stringify({ count, cpuRate: 4, ...measurement }, null, 2), contentType: 'application/json' });
+});
+
+for (const emptyCase of ['search', 'filter', 'explorations']) {
+  test(`empty catalog ${emptyCase} action resets the view through real event wiring`, async ({ page, center }) => {
+    const entry = { entryId: 'empty-action-fixture', kind: emptyCase === 'explorations' ? 'exploration' : 'product',
+      displayName: 'Visible fixture', availability: 'available', executionSummary: { state: 'ended' } };
+    await page.route('**/api/center/v1/entries?*', route => route.fulfill({ json: { schemaVersion: 1,
+      data: { items: [entry], total: 1, nextCursor: null } } }));
+    await openCenter(page, center);
+    if (emptyCase === 'search') await page.locator('#productSearch').fill('no matching product');
+    if (emptyCase === 'filter') await page.locator('[data-filter="archived"]').click();
+    const action = page.locator('#listState button').first();
+    await expect(action).toBeVisible();
+    await action.click();
+    await expect(page.locator('#productRows')).toContainText('Visible fixture');
+    await expect(page.locator('#productSearch')).toHaveValue('');
+    await expect(action).toHaveCount(0);
+    if (emptyCase !== 'explorations') await expect(page.locator('[data-filter="all"]')).toHaveAttribute('data-state', 'on');
+  });
+}
+
+for (const change of ['path', 'mode', 'close', 'escape']) {
+  for (const outcome of ['success', 'error']) {
+    test(`import probe ignores late ${outcome} after ${change}`, async ({ page, center }) => {
+      let pending;
+      await page.route('**/api/center/v1/imports/probe', route => { pending = route; });
+      await openCenter(page, center);
+      await page.locator('#importButton').click();
+      await page.locator('#importForm [name="root"]').fill('/fixture/a');
+      await page.locator('#probeButton').click();
+      await expect.poll(() => Boolean(pending)).toBe(true);
+      if (change === 'path') await page.locator('#importForm [name="root"]').fill('/fixture/b');
+      if (change === 'mode') await page.locator('#importForm [role="radio"][value="reference"]').check();
+      if (change === 'close') await page.locator('#importDialog .dialog-close').first().click();
+      if (change === 'escape') await page.keyboard.press('Escape');
+      if (change === 'close' || change === 'escape') {
+        await expect(page.locator('#importDialog')).not.toBeVisible();
+        await page.locator('#importButton').click();
+      }
+      const finished = page.waitForResponse('**/api/center/v1/imports/probe');
+      await pending.fulfill(outcome === 'success'
+        ? { json: { schemaVersion: 1, data: { candidateId: 'old-a', candidateHash: 'hash-a', displayName: 'Old candidate A' } } }
+        : { status: 400, json: { code: 'SOURCE_MISSING' } });
+      await (await finished).finished();
+      await page.waitForTimeout(100);
+      await expect(page.locator('#probeResult')).not.toBeVisible();
+      await expect(page.locator('#commitImportButton')).not.toBeVisible();
+      await expect(page.locator('#importForm .form-status')).toBeEmpty();
+      await expect(page.locator('#probeButton')).toBeEnabled();
+    });
+  }
+}
+
+test('newer import probe owns rendering and its pending button until it finishes', async ({ page, center }) => {
+  const pending = [];
+  await page.route('**/api/center/v1/imports/probe', route => { pending.push(route); });
+  await openCenter(page, center);
+  await page.locator('#importButton').click();
+  const root = page.locator('#importForm [name="root"]');
+  await root.fill('/fixture/a');
+  await page.locator('#probeButton').click();
+  await expect.poll(() => pending.length).toBe(1);
+  await root.fill('/fixture/b');
+  await page.locator('#probeButton').click();
+  await expect.poll(() => pending.length).toBe(2);
+  await pending[0].fulfill({ json: { schemaVersion: 1, data: { candidateId: 'a', candidateHash: 'hash-a', displayName: 'Old candidate A' } } });
+  await page.waitForTimeout(100);
+  await expect(page.locator('#probeButton')).toBeDisabled();
+  await expect(page.locator('#commitImportButton')).not.toBeVisible();
+  await pending[1].fulfill({ json: { schemaVersion: 1, data: { candidateId: 'b', candidateHash: 'hash-b', displayName: 'New candidate B' } } });
+  await expect(page.locator('#probeResult')).toContainText('New candidate B');
+  await expect(page.locator('#probeButton')).toBeEnabled();
+  await expect(page.locator('#commitImportButton')).toBeVisible();
+  let committed;
+  await page.route('**/api/center/v1/imports/commit', route => { committed = route.request().postDataJSON(); return route.fulfill({ json: { schemaVersion: 1, data: {} } }); });
+  await page.locator('#commitImportButton').click();
+  await expect(page.locator('#importDialog')).not.toBeVisible();
+  expect(committed.candidateId).toBe('b');
+  expect(committed.candidateHash).toBe('hash-b');
+});
+
+for (const action of ['stop', 'cancel']) {
+  for (const failure of ['transport', 'revision']) {
+    test(`${action} keeps confirmation open after ${failure} failure`, async ({ page, center }) => {
+      await queueFixture(page, center, action === 'stop');
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      let calls = 0;
+      await page.route(`**/api/center/v1/requests/request_fixture/${action}`, async route => {
+        calls++;
+        await gate;
+        if (failure === 'transport') await route.abort('failed');
+        else await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ code: 'REVISION_CONFLICT' }) });
+      });
+      await page.locator('#queueNavButton').click();
+      await page.locator('#queueContent button').filter({ hasText: action === 'stop' ? /^Stop/ : /^Cancel$/ }).click();
+      await page.locator('#confirmActionButton').click();
+      await expect(page.locator('#confirmActionButton')).toBeDisabled();
+      await page.locator('#confirmForm').evaluate(form => form.dispatchEvent(new Event('submit', { cancelable: true })));
+      await expect.poll(() => calls).toBe(1);
+      release();
+      await expect(page.locator('#confirmForm .form-status')).toHaveClass(/error/);
+      await expect(page.locator('#confirmDialog')).toBeVisible();
+      await expect(page.locator('#confirmActionButton')).toBeEnabled();
+      expect(calls).toBe(1);
+    });
+  }
+}
+
+test('reconcile failure remains visible and repeated clicks cannot duplicate the request', async ({ page, center }) => {
+  await queueFixture(page, center, true);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let calls = 0;
+  await page.route('**/api/center/v1/requests/request_fixture/reconcile', async route => { calls++; await gate; await route.abort('failed'); });
+  await page.locator('#queueNavButton').click();
+  const reconcile = page.locator('[data-focus-key="request:request_fixture:reconcile"]');
+  await reconcile.click();
+  await expect(reconcile).toBeDisabled();
+  await expect.poll(() => calls).toBe(1);
+  release();
+  await expect(page.locator('#actionError')).toContainText(/failed/i);
+  await expect(reconcile).toBeEnabled();
+  expect(calls).toBe(1);
+});
+
+for (const moveFocus of [false, true]) {
+  test(`reconcile failure ${moveFocus ? 'preserves a newer focus choice' : 'restores keyboard focus to its retry control'}`, async ({ page, center }) => {
+    await queueFixture(page, center, true);
+    let pending;
+    await page.route('**/api/center/v1/requests/request_fixture/reconcile', route => { pending = route; });
+    await page.locator('#queueNavButton').click();
+    const reconcile = page.locator('[data-focus-key="request:request_fixture:reconcile"]');
+    await reconcile.focus(); await page.keyboard.press('Enter');
+    await expect(reconcile).toBeDisabled(); await expect.poll(() => Boolean(pending)).toBe(true);
+    const expectedFocus = moveFocus ? page.locator('#closeQueueButton') : reconcile;
+    if (moveFocus) await expectedFocus.focus();
+    await pending.fulfill({ status: 409, json: { code: 'REVISION_CONFLICT' } });
+    await expect(reconcile).toBeEnabled();
+    await expect(expectedFocus).toBeFocused();
+  });
+}
+
+test('failed partial refresh retains last rendered freshness even after a delayed response', async ({ page, center }) => {
+  await openCenter(page, center);
+  const previous = await page.locator('#observedAt').textContent();
+  const time = previous.match(/\d{2}:\d{2}/)?.[0];
+  expect(time).toBeTruthy();
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  await page.route('**/api/center/v1/summary', async route => {
+    const response = await route.fetch(); const payload = await response.json();
+    payload.observedAt = '2020-01-01T00:00:00Z'; payload.revision = 999;
+    await route.fulfill({ json: payload });
+  });
+  await page.route('**/api/center/v1/operations', route => route.abort('failed'));
+  await page.route('**/api/center/v1/preferences', async route => {
+    const response = await route.fetch(); const payload = await response.json();
+    payload.observedAt = '2020-01-01T00:00:00Z'; payload.revision = 999;
+    await gate; await route.fulfill({ json: payload });
+  });
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect(page.locator('#observedAt')).toContainText(/last|stale/i);
+  await expect(page.locator('#observedAt')).toContainText(time);
+  release();
+  await expect(page.locator('#observedAt')).toContainText(time);
+  await page.locator('#queueNavButton').click();
+  await expect(page.locator('#dispatchButton')).toBeDisabled();
+});
+
+
+test('Escape cancels only the top confirmation and restores the refreshed queue origin', async ({ page, center }) => {
+  await queueFixture(page, center, false);
+  const queue = page.locator('#queueNavButton');
+  await queue.focus(); await page.keyboard.press('Enter');
+  const cancel = page.locator('#queueContent button').filter({ hasText: /^Cancel$/ });
+  await cancel.focus(); await page.keyboard.press('Enter');
+  const dialog = page.locator('#confirmDialog');
+  await expect(dialog).toBeVisible();
+  await page.waitForTimeout(5500);
+  await page.keyboard.press('Escape');
+  await expect(dialog).not.toBeVisible();
+  await expect(page.locator('#queueDrawer')).toBeVisible();
+  expect(await page.locator('#newWorkButton').evaluate(node => Boolean(node.closest('[aria-hidden="true"]')))).toBe(true);
+  await expect(cancel).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#queueDrawer')).not.toBeVisible();
+  expect(await page.locator('#newWorkButton').evaluate(node => Boolean(node.closest('[aria-hidden="true"]')))).toBe(false);
+  await expect(queue).toBeFocused();
+});
+
+test('Escape from a menu confirmation returns to its More trigger', async ({ page, center }) => {
+  await queueFixture(page, center, false);
+  const more = page.locator('.more-button').first();
+  await more.focus(); await page.keyboard.press('Enter');
+  const archive = page.getByRole('menuitem').filter({ hasText: /^Archive$/ });
+  await archive.focus(); await page.keyboard.press('Enter');
+  await expect(page.locator('#confirmDialog')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#confirmDialog')).not.toBeVisible();
+  await expect(more).toBeFocused();
+  await expect(more).toHaveAttribute('aria-expanded', 'false');
+});
+
+// These delayed HTTP fixtures exercise shared Radix dialogs and real input controls.
+// They never call a model or dispatch work through the fixture's fake adapter.
+const preferencesFixture = { revision: 2, language: 'en', engine: 'claude', model: 'fixture-model', effort: 'high', productLanguage: 'en' };
+function centerEnvelope(data) {
+  return { schemaVersion: 1, centerId: 'fixture', revision: 10, observedAt: new Date().toISOString(), data };
+}
+async function finishDelayedResponse(page, route, options) {
+  const response = page.waitForResponse(value => value.request() === route.request());
+  await route.fulfill(options);
+  await (await response).finished();
+  // Let fetch continuations and shared dialog/focus updates reach the renderer.
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+}
+
+test('settings loading disables only configuration inputs and does not steal Cancel focus', async ({ page, center }) => {
+  await queueFixture(page, center, false);
+  const pending = []; let released = false;
+  await page.route('**/api/center/v1/preferences', route => {
+    if (!released) { pending.push(route); return; }
+    return route.fulfill({ json: centerEnvelope(preferencesFixture) });
+  });
+  await page.locator('#settingsButton').click();
+  await expect.poll(() => pending.length).toBeGreaterThan(0);
+  for (const name of ['language', 'engine', 'model', 'effort', 'productLanguage']) await expect(page.locator(`#settingsForm [name="${name}"]`)).toBeDisabled();
+  const close = page.locator('#settingsDialog .dialog-close').last();
+  await expect(close).toBeEnabled(); await close.focus();
+  released = true;
+  for (const route of pending) await finishDelayedResponse(page, route, { json: centerEnvelope(preferencesFixture) });
+  await expect(close).toBeFocused();
+  await expect(page.locator('#settingsForm [name="model"]')).toHaveValue('fixture-model');
+  for (const name of ['language', 'engine', 'model', 'effort', 'productLanguage']) await expect(page.locator(`#settingsForm [name="${name}"]`)).toBeEnabled();
+  await close.click(); await expect(page.locator('#settingsDialog')).not.toBeVisible();
+});
+
+test('settings save preserves newer input and retries against its own returned revision', async ({ page, center }) => {
+  await queueFixture(page, center, false);
+  const writes = [];
+  await page.route('**/api/center/v1/preferences', route => {
+    if (route.request().method() === 'POST') { writes.push(route); return; }
+    return route.fulfill({ json: centerEnvelope(preferencesFixture) });
+  });
+  await page.locator('#settingsButton').click();
+  const model = page.locator('#settingsForm [name="model"]'); const save = page.locator('#settingsForm [type="submit"]');
+  await expect(save).toBeEnabled(); await model.fill('submitted-model'); await save.click();
+  await expect.poll(() => writes.length).toBe(1);
+  await model.fill('newer-unsaved-model');
+  expect(writes[0].request().postDataJSON().preferences.model).toBe('submitted-model');
+  await finishDelayedResponse(page, writes[0], { json: centerEnvelope({ ...preferencesFixture, model: 'submitted-model', revision: 3 }) });
+  await expect(page.locator('#settingsDialog')).toBeVisible(); await expect(model).toHaveValue('newer-unsaved-model');
+  await expect(page.locator('#settingsForm .form-status')).toContainText('newer edits are not saved');
+  await expect(save).toBeEnabled(); await save.click(); await expect.poll(() => writes.length).toBe(2);
+  expect(writes[1].request().postDataJSON()).toMatchObject({ expectedRevision: 3, preferences: { model: 'newer-unsaved-model' } });
+  await finishDelayedResponse(page, writes[1], { status: 409, json: { code: 'REVISION_CONFLICT' } });
+  await expect(model).toHaveValue('newer-unsaved-model'); await expect(page.locator('#settingsForm .form-status')).toHaveClass(/error/);
+});
+
+test('reopened settings hides old template controls until the new preferences load finishes', async ({ page, center }) => {
+  await queueFixture(page, center, false);
+  const preferences = { ...preferencesFixture, templates: [{ templateId: 'template-old', name: 'Previous template', config: { engine: 'claude', model: 'template-model', effort: 'high', productLanguage: 'en' } }] };
+  let pending; let hold = false;
+  await page.route('**/api/center/v1/preferences', route => {
+    if (hold) { pending = route; return; }
+    return route.fulfill({ json: centerEnvelope(preferences) });
+  });
+  await page.locator('#settingsButton').click();
+  const templates = page.locator('#settingsForm .template-controls');
+  await expect(templates).toBeVisible(); await expect(templates.locator('select')).toContainText('Previous template');
+  await page.locator('#settingsDialog .dialog-close').first().click(); await expect(page.locator('#settingsDialog')).not.toBeVisible();
+  hold = true; await page.locator('#settingsButton').click(); await expect.poll(() => Boolean(pending)).toBe(true);
+  await expect(templates).not.toBeVisible(); await expect(templates.locator('button').first()).not.toBeVisible();
+  await expect(page.locator('#settingsForm [name="model"]')).toBeDisabled();
+  await expect(page.locator('#settingsDialog .dialog-close').first()).toBeEnabled();
+  hold = false;
+  await finishDelayedResponse(page, pending, { json: centerEnvelope({ ...preferences, model: 'server-model', revision: 3 }) });
+  await expect(templates).toBeVisible(); await expect(page.locator('#settingsForm [name="model"]')).toHaveValue('server-model');
+});
+
+for (const kind of ['continue', 'new']) {
+  test(`${kind} work completion preserves a reopened form and does not open the queue over it`, async ({ page, center }) => {
+    const { entry } = await queueFixture(page, center, false);
+    const formId = kind === 'continue' ? 'continue' : 'newWork';
+    const openWork = async () => {
+      if (kind === 'continue') {
+        await page.locator('.more-button').first().click();
+        await page.getByRole('menuitem', { name: 'Continue', exact: true }).click();
+      } else await page.locator('#newWorkButton').click();
+    };
+    const marker = `Catalog reconciled after ${kind} work`;
+    const refreshReads = []; let refreshReleased = false; let pending;
+    // Hold the final read in any in-flight refresh. The completed write must
+    // reach its global success status before we let that snapshot render.
+    await page.route('**/api/center/v1/preferences', route => {
+      if (!refreshReleased) { refreshReads.push(route); return; }
+      return route.fulfill({ json: centerEnvelope(preferencesFixture) });
+    });
+    await page.route('**/api/center/v1/entries?*', route => route.fulfill({ json: centerEnvelope({
+      items: [{ ...entry, displayName: marker }], total: 1, nextCursor: null,
+    }) }));
+    await page.route(`**/api/center/v1/${kind === 'continue' ? 'requests' : 'explorations/batch'}`, route => { pending = route; });
+    await openWork(); await page.locator(`#${formId}Form [type="submit"]`).click();
+    await expect.poll(() => Boolean(pending)).toBe(true);
+    await page.locator(`#${formId}Dialog .dialog-close`).first().click();
+    await expect(page.locator(`#${formId}Dialog`)).not.toBeVisible(); await openWork();
+    const model = page.locator(`#${formId}Form [name="model"]`); await model.fill('new-form-model');
+    await finishDelayedResponse(page, pending, { json: centerEnvelope({}) });
+    await expect(page.locator('[data-sonner-toast]').last()).toBeVisible();
+    await expect.poll(() => refreshReads.length).toBeGreaterThan(0);
+    refreshReleased = true;
+    for (const route of refreshReads) await finishDelayedResponse(page, route, { json: centerEnvelope(preferencesFixture) });
+    // Unlike observing a GET, this marker proves the full refresh reached
+    // renderPage, after which the awaiting work handler decides on openQueue.
+    await expect(page.locator('#productRows')).toContainText(marker);
+    await expect(page.locator(`#${formId}Dialog`)).toBeVisible(); await expect(model).toHaveValue('new-form-model');
+    await expect(model).toBeFocused(); await expect(page.locator(`#${formId}Form [type="submit"]`)).toBeEnabled();
+    await expect(page.locator('#queueDrawer')).not.toBeVisible();
+  });
+}
+
+test('old cancel failure cannot overwrite or unlock a newer stop-all confirmation', async ({ page, center }) => {
+  await queueFixture(page, center, false);
+  let old; let current;
+  await page.route('**/api/center/v1/requests/request_fixture/cancel', route => { old = route; });
+  await page.route('**/api/center/v1/queue/stop-all', route => { current = route; });
+  await page.locator('#queueNavButton').click();
+  await page.locator('#queueContent button').filter({ hasText: /^Cancel$/ }).click(); await page.locator('#confirmActionButton').click();
+  await expect.poll(() => Boolean(old)).toBe(true);
+  await page.locator('#confirmDialog .dialog-close').first().click(); await page.locator('#stopAllButton').click();
+  await expect(page.locator('#confirmActionButton')).toBeEnabled(); await page.locator('#confirmActionButton').click();
+  await expect.poll(() => Boolean(current)).toBe(true);
+  await finishDelayedResponse(page, old, { status: 409, json: { code: 'REVISION_CONFLICT' } });
+  await expect(page.locator('#confirmDialog')).toBeVisible(); await expect(page.locator('#confirmActionButton')).toBeDisabled();
+  await expect(page.locator('#confirmForm .form-status')).toContainText('Submitting…');
+  await finishDelayedResponse(page, current, { json: centerEnvelope({}) });
+  await expect(page.locator('#confirmDialog')).not.toBeVisible();
+});
+
+test('old import commit preserves the next candidate and its pending confirmation', async ({ page, center }) => {
+  await queueFixture(page, center, false);
+  let probes = 0; const commits = [];
+  await page.route('**/api/center/v1/imports/probe', route => {
+    const id = ++probes;
+    return route.fulfill({ json: centerEnvelope({ candidateId: `candidate-${id}`, candidateHash: `hash-${id}`, displayName: `Candidate ${id}` }) });
+  });
+  await page.route('**/api/center/v1/imports/commit', route => { commits.push(route); });
+  await page.locator('#importButton').click(); await page.locator('#importForm [name="root"]').fill('/fixture/a');
+  await page.locator('#probeButton').click(); await expect(page.locator('#probeResult')).toContainText('Candidate 1');
+  await page.locator('#commitImportButton').click(); await expect.poll(() => commits.length).toBe(1);
+  await page.locator('#importDialog .dialog-close').first().click(); await page.locator('#importButton').click();
+  await page.locator('#importForm [name="root"]').fill('/fixture/b'); await page.locator('#probeButton').click();
+  await expect(page.locator('#probeResult')).toContainText('Candidate 2'); await page.locator('#commitImportButton').click();
+  await expect.poll(() => commits.length).toBe(2);
+  expect(commits[1].request().postDataJSON()).toMatchObject({ candidateId: 'candidate-2', candidateHash: 'hash-2' });
+  await finishDelayedResponse(page, commits[0], { json: centerEnvelope({}) });
+  await expect(page.locator('#importDialog')).toBeVisible(); await expect(page.locator('#probeResult')).toContainText('Candidate 2');
+  await expect(page.locator('#commitImportButton')).toBeDisabled(); await expect(page.locator('#importForm .form-status')).toContainText('Submitting…');
+  await finishDelayedResponse(page, commits[1], { json: centerEnvelope({}) });
+  await expect(page.locator('#importDialog')).not.toBeVisible();
+});
+
+test('source selection keeps its current fields when an older takeover fails', async ({ page, center }) => {
+  await queueFixture(page, center, false);
+  const sources = ['source-a', 'source-b'].map(sourceId => ({ sourceId, kind: 'runtime', revision: 1, displayName: sourceId, availability: 'available' }));
+  await page.route(`**/api/center/v1/entries/${center.entryId}`, route => route.fulfill({ json: centerEnvelope({
+    entryId: center.entryId, displayName: 'Queue fixture', sourceId: 'source-a', revision: 1, sources, capabilities: { takeover: true },
+  }) }));
+  let pending;
+  await page.route('**/api/center/v1/sources/source-a/takeover', route => { pending = route; });
+  await page.locator('.more-button').first().click(); await page.getByRole('menuitem').filter({ hasText: /^Manage sources$/ }).click();
+  await page.locator('#sourceManagerBody button').filter({ hasText: /^Take over with center$/ }).click(); await expect.poll(() => Boolean(pending)).toBe(true);
+  const selected = page.locator('#sourceManagerBody [role="radio"][value="source-b"]'); await selected.check();
+  const root = page.locator('#sourceManagerBody .reconnect-field input'); await root.fill('/fixture/new-source');
+  const status = await page.locator('#sourceManagerStatus').textContent();
+  await finishDelayedResponse(page, pending, { status: 409, json: { code: 'SOURCE_CHANGED' } });
+  await expect(selected).toBeChecked(); await expect(root).toHaveValue('/fixture/new-source'); await expect(root).toBeFocused();
+  await expect(page.locator('#sourceManagerStatus')).toHaveText(status);
+});
+
+for (const failure of [false, true]) {
+  test(`source switch keeps the serial action lock visible until old ${failure ? 'failure' : 'success'} finishes`, async ({ page, center }) => {
+    await queueFixture(page, center, false);
+    const sources = ['source-a', 'source-b'].map(sourceId => ({ sourceId, kind: 'runtime', revision: 1, displayName: sourceId, availability: 'available' }));
+    let selected = false; let pending; const selections = [];
+    await page.route(`**/api/center/v1/entries/${center.entryId}`, route => route.fulfill({ json: centerEnvelope({
+      entryId: center.entryId, sourceId: selected ? 'source-b' : 'source-a', revision: 1, sources, capabilities: { takeover: true },
+    }) }));
+    await page.route('**/api/center/v1/sources/source-a/takeover', route => { pending = route; });
+    await page.route(`**/api/center/v1/entries/${center.entryId}/source-selection`, route => {
+      selections.push(route.request().postDataJSON()); selected = true; return route.fulfill({ json: centerEnvelope({}) });
+    });
+    await page.locator('.more-button').first().click(); await page.getByRole('menuitem', { name: 'Manage sources', exact: true }).click();
+    const takeover = page.locator('#sourceManagerBody button').filter({ hasText: /^Take over with center$/ });
+    await takeover.click(); await expect.poll(() => Boolean(pending)).toBe(true);
+    const sourceB = page.locator('#sourceManagerBody [role="radio"][value="source-b"]'); await sourceB.check();
+    const useB = page.locator('#sourceManagerBody button').filter({ hasText: /^Use selected source$/ });
+    await expect(useB).toBeDisabled(); await expect(useB.locator('..')).toContainText('Operation in progress');
+    const root = page.locator('#sourceManagerBody .reconnect-field input'); await root.fill('/fixture/b-draft');
+    await finishDelayedResponse(page, pending, failure ? { status: 409, json: { code: 'SOURCE_CHANGED' } } : { json: centerEnvelope({ state: 'succeeded' }) });
+    await expect(useB).toBeEnabled(); await expect(takeover).toBeDisabled(); await expect(sourceB).toBeChecked();
+    await expect(root).toHaveValue('/fixture/b-draft'); await expect(root).toBeFocused();
+    await expect(page.locator('#sourceManagerStatus')).toBeEmpty(); expect(selections).toEqual([]);
+    await useB.click(); await expect.poll(() => selections.length).toBe(1);
+    expect(selections[0].sourceId).toBe('source-b'); await expect(page.locator('#sourceManagerStatus')).toHaveText('Current source updated.');
+  });
+}
+
+test('closing confirmation falls back inside the queue when its original action disappears', async ({ page, center }) => {
+  await queueFixture(page, center, false);
+  await page.locator('#queueNavButton').click();
+  const cancel = page.locator('#queueContent button').filter({ hasText: /^Cancel$/ }); await cancel.click();
+  await expect(page.locator('#confirmDialog')).toBeVisible();
+  await page.route('**/api/center/v1/requests?*', route => route.fulfill({ json: centerEnvelope({ items: [], revision: 2 }) }));
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect(cancel).toHaveCount(0);
+  await page.keyboard.press('Escape'); await expect(page.locator('#confirmDialog')).not.toBeVisible();
+  await expect(page.locator('#queueDrawer')).toBeVisible(); await expect(page.locator('#closeQueueButton')).toBeFocused();
+});
+
+for (const change of ['hidden', 'disabled', 'drawer-closed']) {
+  test(`confirmation focus ignores its ${change} origin`, async ({ page, center }) => {
+    await queueFixture(page, center, false);
+    await page.locator('#queueNavButton').click();
+    const cancel = page.locator('#queueContent button').filter({ hasText: /^Cancel$/ });
+    await cancel.click(); await expect(page.locator('#confirmDialog')).toBeVisible();
+    if (change === 'drawer-closed') await page.evaluate(() => document.getElementById('queueDrawer').close());
+    else await cancel.evaluate((node, mode) => { if (mode === 'hidden') node.hidden = true; else node.disabled = true; }, change);
+    await page.keyboard.press('Escape'); await expect(page.locator('#confirmDialog')).not.toBeVisible();
+    await expect(page.locator(change === 'drawer-closed' ? '#queueNavButton' : '#closeQueueButton')).toBeFocused();
+  });
+}
+
+test('reconnect failure keeps retry focus and clears its error after the path changes', async ({ page, center }) => {
+  await queueFixture(page, center, false);
+  await page.route(`**/api/center/v1/entries/${center.entryId}`, route => route.fulfill({ json: centerEnvelope({
+    entryId: center.entryId, sourceId: 'source-a', revision: 1, sources: [{ sourceId: 'source-a', kind: 'runtime', revision: 1, availability: 'available' }], capabilities: {},
+  }) }));
+  await page.route('**/api/center/v1/imports/probe', route => route.fulfill({ status: 409, json: { code: 'SOURCE_CHANGED' } }));
+  await page.locator('.more-button').first().click(); await page.getByRole('menuitem', { name: 'Manage sources', exact: true }).click();
+  const root = page.locator('#sourceManagerBody .reconnect-field input'); await root.fill('/fixture/old');
+  const reconnect = page.locator('#sourceManagerBody button').filter({ hasText: /^Reconnect/ });
+  await reconnect.focus(); await page.keyboard.press('Enter');
+  await expect(page.locator('#sourceManagerStatus')).toHaveClass(/error/);
+  await expect(reconnect).toBeEnabled(); await expect(reconnect).toBeFocused();
+  await root.fill('/fixture/new'); await expect(page.locator('#sourceManagerStatus')).toBeEmpty();
 });

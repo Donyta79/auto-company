@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -152,14 +153,17 @@ class CenterHandler(BaseHTTPRequestHandler):
         return request.path, {key: value[0] for key, value in values.items()}
 
     def read_body(self):
-        if self.headers.get("Transfer-Encoding"):
+        if self.headers.get_all("Transfer-Encoding", []):
             raise CenterError("INVALID_REQUEST", "Transfer encoding is not supported.", status=400)
         if self.headers.get_content_type() != "application/json":
             raise CenterError("JSON_REQUIRED", "A JSON object is required.", status=415)
         if len(self.headers.get_all("Content-Length", [])) != 1:
             raise CenterError("INVALID_REQUEST", "One content length is required.", status=411)
         try:
-            length = int(self.headers["Content-Length"])
+            length_text = self.headers["Content-Length"].strip(" \t")
+            if re.fullmatch(r"[0-9]+", length_text) is None:
+                raise ValueError("Invalid content length")
+            length = int(length_text)
         except (TypeError, ValueError):
             raise CenterError("INVALID_REQUEST", "Invalid content length.", status=400) from None
         if not 0 <= length <= MAX_BODY:
@@ -174,7 +178,12 @@ class CenterHandler(BaseHTTPRequestHandler):
                     raise ValueError("Duplicate JSON key")
                 result[key] = value
             return result
-        body = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs,
+        def finite_float(value):
+            result = float(value)
+            if not math.isfinite(result):
+                raise ValueError("Nonfinite number")
+            return result
+        body = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs, parse_float=finite_float,
                           parse_constant=lambda value: (_ for _ in ()).throw(ValueError("Nonfinite number")))
         if not isinstance(body, dict):
             raise CenterError("INVALID_REQUEST", "A JSON object is required.", status=400)

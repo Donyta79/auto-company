@@ -12,6 +12,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/core"))
 import product_identity as products
+from usage_lib import build_cycle_record
 
 
 class ProductIdentityTests(unittest.TestCase):
@@ -82,12 +83,79 @@ class ProductIdentityTests(unittest.TestCase):
         (self.root / "logs" / (row["cycleId"] + ".events.jsonl")).write_text('{"type":"thread.started"}\n')
         self.assertEqual(products.recover_cycles(self.root)[0]["state"], "interrupted")
 
+    def usage_record(self, row):
+        return build_cycle_record(
+            cycle_id=row["cycleId"], cycle_number=row["runCycleNumber"],
+            started_at=row["reservedAt"], ended_at=row["reservedAt"],
+            status="completed", exit_code=0, engine="codex", model="fixture",
+            metadata_raw="{}",
+        )
+
     def test_final_usage_commit_recovers_closed_cycle(self):
         row = self.reserve("closed-before-crash")
         products.update_cycle(self.root, row["cycleId"], "dispatching")
         (self.root / "logs").mkdir()
-        (self.root / "logs/usage.jsonl").write_text(json.dumps({"kind": "cycle_usage", "cycle_id": row["cycleId"], "status": "completed"}) + "\n")
+        (self.root / "logs/usage.jsonl").write_text(json.dumps(self.usage_record(row)) + "\n")
         self.assertEqual(products.recover_cycles(self.root)[0]["state"], "completed")
+
+    def test_recovery_rejects_invalid_usage_without_closing_cycle(self):
+        row = self.reserve("invalid-usage")
+        products.update_cycle(self.root, row["cycleId"], "dispatching")
+        state = self.root / ".autonomous-company/product-state.json"
+        before = state.read_bytes()
+        record = self.usage_record(row)
+        valid = json.dumps(record) + "\n"
+        variants = {
+            "truncated": valid + '{"kind":',
+            "conflicting closure": valid + json.dumps(dict(record, status="failed")) + "\n",
+            "unsupported record": valid + "[]\n",
+            "invalid UTF-8": valid.encode() + b"\xff",
+        }
+        for amount in (True, -1, float("inf"), float("nan")):
+            variants[f"invalid tokens {amount}"] = json.dumps(dict(record, usage={"total_tokens": amount})) + "\n"
+            variants[f"invalid cost {amount}"] = json.dumps(dict(record, cost_usd=amount)) + "\n"
+        ledger = self.root / "logs/usage.jsonl"
+        ledger.parent.mkdir()
+        for name, content in variants.items():
+            with self.subTest(name=name):
+                state.write_bytes(before)
+                ledger.write_bytes(content if isinstance(content, bytes) else content.encode())
+                with self.assertRaisesRegex(ValueError, "usage ledger contains invalid records"):
+                    products.recover_cycles(self.root)
+                self.assertEqual(state.read_bytes(), before)
+                self.assertFalse((self.root / ".autonomous-company/product-state.transaction.json").exists())
+                self.assertFalse((self.root / ".autonomous-company/product-state.lock").exists())
+
+    def test_recovery_cli_reports_invalid_usage_and_preserves_reservation(self):
+        row = self.reserve("invalid-recovery-cli")
+        ledger = self.root / "logs/usage.jsonl"
+        ledger.parent.mkdir()
+        ledger.write_text(json.dumps(self.usage_record(row)) + '\n{"truncated":')
+        state = self.root / ".autonomous-company/product-state.json"
+        before = state.read_bytes()
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/core/product_identity.py"),
+                                 "--root", str(self.root), "recover"],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("usage ledger contains invalid records", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(state.read_bytes(), before)
+        ledger.write_text(json.dumps(self.usage_record(row)) + "\n")
+        self.assertEqual(products.recover_cycles(self.root)[0]["state"], "completed")
+
+    def test_recovery_accepts_identical_usage_replays_once(self):
+        row = self.reserve("replayed-usage")
+        products.update_cycle(self.root, row["cycleId"], "dispatching")
+        record = self.usage_record(row)
+        ledger = self.root / "logs/usage.jsonl"
+        ledger.parent.mkdir()
+        ledger.write_text((json.dumps(record) + "\n") * 2)
+        before = ledger.read_bytes()
+        recovered, = products.recover_cycles(self.root)
+        self.assertEqual(recovered["state"], "completed")
+        self.assertEqual(recovered["startedAt"], record["started_at"])
+        self.assertEqual(products.recover_cycles(self.root), [])
+        self.assertEqual(ledger.read_bytes(), before)
 
     def test_products_have_independent_sequences(self):
         alpha = self.reserve("alpha-1")

@@ -125,7 +125,7 @@ class CenterCatalog:
     def probe(self, body):
         root = root_path(body.get('root'))
         kind_hint = body.get('kindHint')
-        if kind_hint not in {None, 'reference'}:
+        if kind_hint is not None and (not isinstance(kind_hint, str) or kind_hint != 'reference'):
             raise CenterError('INVALID_INPUT', 'Unsupported source kind hint.')
         scan = self._scan(root, kind_hint)
         candidate = {**scan, 'candidateId': uid('candidate'), 'candidateHash': digest(scan),
@@ -141,8 +141,11 @@ class CenterCatalog:
         return candidate
 
     def _candidate(self, body):
+        candidate_id = body.get('candidateId')
+        if candidate_id is not None and not isinstance(candidate_id, str):
+            raise CenterError('INVALID_INPUT', 'Candidate ID must be a string.')
         with self.store.transaction() as tx:
-            candidate = tx.get('candidates', body.get('candidateId'))
+            candidate = tx.get('candidates', candidate_id)
         if not candidate or body.get('candidateHash') != candidate['candidateHash']:
             raise CenterError('CANDIDATE_INVALID', 'Import candidate is missing or does not match.', 409)
         if datetime.fromisoformat(candidate['expiresAt']) < datetime.now(timezone.utc):
@@ -164,10 +167,10 @@ class CenterCatalog:
                     return prior['result']
         candidate = self._candidate(body)
         mode = body.get('mode', 'readonly')
-        if mode not in {'readonly', 'reference', 'read_only'}:
+        if not isinstance(mode, str) or mode not in {'readonly', 'reference', 'read_only'}:
             raise CenterError('INVALID_INPUT', 'Import does not grant execution authority.')
         selected = body.get('itemIds', [row['itemId'] for row in candidate['items']])
-        if not isinstance(selected, list) or not selected or any(item not in {row['itemId'] for row in candidate['items']} for item in selected):
+        if not isinstance(selected, list) or not selected or any(not isinstance(item, str) or item not in {row['itemId'] for row in candidate['items']} for item in selected):
             raise CenterError('INVALID_INPUT', 'Select inspected candidate items.')
         results = []
         with self.store.transaction() as tx:
@@ -229,6 +232,9 @@ class CenterCatalog:
         return {'items': results}
 
     def resolve_source(self, entry_id, source_id=None):
+        for field, value in (('entryId', entry_id), ('sourceId', source_id)):
+            if value is not None and not isinstance(value, str):
+                raise CenterError('INVALID_INPUT', f'{field} must be a string.')
         with self.store.transaction() as tx:
             entry = tx.get('entries', entry_id)
             if not entry or entry.get('detached'):
@@ -641,12 +647,18 @@ class CenterCatalog:
             entry = tx.get('entries', entry_id)
             if not entry or entry.get('detached'):
                 raise CenterError('ENTRY_NOT_FOUND', 'Entry is unavailable.', 404)
-            if body.get('expectedRevision') != entry['revision']:
+            expected = body.get('expectedRevision')
+            if expected is not None and (type(expected) is not int or not 0 <= expected <= 9007199254740991):
+                raise CenterError('INVALID_REQUEST', 'Expected revision must be an integer.')
+            if expected != entry['revision']:
                 raise CenterError('REVISION_CONFLICT', 'Entry changed; reload it.', 409)
             if action in {'archive', 'detach'}:
                 self._idle(tx, entry_id)
             if action == 'source-selection':
-                source = tx.get('sources', body.get('sourceId'))
+                source_id = body.get('sourceId')
+                if source_id is not None and not isinstance(source_id, str):
+                    raise CenterError('INVALID_INPUT', 'Source ID must be a string.')
+                source = tx.get('sources', source_id)
                 if not source or source['entryId'] != entry_id or source.get('detached'):
                     raise CenterError('SOURCE_NOT_FOUND', 'Source does not belong to this entry.', 404)
                 entry['preferredSourceId'] = source['sourceId']
@@ -691,7 +703,10 @@ class CenterCatalog:
             source = tx.get('sources', source_id)
             if not source:
                 raise CenterError('SOURCE_NOT_FOUND', 'Source is unavailable.', 404)
-            if body.get('expectedRevision') != source.get('revision'):
+            expected = body.get('expectedRevision')
+            if expected is not None and (type(expected) is not int or not 0 <= expected <= 9007199254740991):
+                raise CenterError('INVALID_REQUEST', 'Expected revision must be an integer.')
+            if expected != source.get('revision'):
                 raise CenterError('REVISION_CONFLICT', 'Source changed; reload it.', 409)
             self._idle(tx, source['entryId'])
             if source.get('runtimeId') and (tx.get('runtimes', source['runtimeId']) or {}).get('managed'):

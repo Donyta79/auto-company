@@ -9,14 +9,14 @@ window.DashboardNavigation.register('center', (view) => {
   const CATALOG_FILTERS = ["all", "running", "queued", "attention", "archived", "exploration", "reference", "read_only", "paused", "ended", "idle", "unknown", "failed", "blocked", "canceled", "preparing", "starting", "stopping"];
   const TERMINAL_STATES = new Set(["ended", "failed", "canceled"]);
   const state = {
-    language: "zh-CN", revision: null, centerId: null, observedAt: null,
-    summary: null, entries: [], requests: [], operations: [], preferences: null,
+    language: "zh-CN", revision: null, apiRevision: null, apiCenterId: null, centerId: null, observedAt: null,
+    summary: null, entries: [], requests: [], operations: [], preferences: null, preferencesRevision: null, preferencesToken: 0,
     query: "", filter: "all", loading: true, stale: false, refreshing: null,
-    refreshToken: 0, timer: null, menuEntryId: null, historyVisible: false,
-    activeEntry: null, managementEntry: null, selectedSourceId: null, sourceToken: 0, probe: null, confirmAction: null, drawerOpen: false, pendingWrites: new Map(), projectionSignature: "", projectionTimer: null,
+    refreshToken: 0, dialogToken: 0, timer: null, menuEntryId: null, historyVisible: false,
+    activeEntry: null, managementEntry: null, selectedSourceId: null, sourceToken: 0, sourceRefreshToken: 0, sourceStatusToken: 0, probe: null, probeToken: 0, confirmAction: null, drawerOpen: false, pendingWrites: new Map(), projectionSignature: "", projectionTimer: null,
     activeWorkGroupId: null, nextWorkGroupId: 0, workSubmitting: false,
     lastSuccessAt: null, restoreScroll: null, focusOrder: [], announcement: "",
-    actionLocks: new Set(),
+    actionLocks: new Set(), requestActions: new Map(), sourceActions: [],
     autoRefresh: true,
     otherExpanded: false,
     sort: "activity", sortDirection: "desc", roundFilter: "all", previewMode: "screenshot",
@@ -80,14 +80,18 @@ window.DashboardNavigation.register('center', (view) => {
     state.focusOrder = [...document.querySelectorAll("[data-focus-key]")].map(node => node.dataset.focusKey);
     return active && active !== document.body ? text(active.dataset?.focusKey) : "";
   }
+  function focusControl(node) {
+    if (!node || node.disabled || node.closest?.('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]') || (node.getClientRects && !node.getClientRects().length)) return false;
+    node.focus({ preventScroll: true }); return true;
+  }
   function restoreFocus(key) {
     if (!key) return;
     const node = [...document.querySelectorAll("[data-focus-key]")].find((item) => item.dataset.focusKey === key);
-    if (node && !node.disabled) node.focus({ preventScroll: true });
+    if (focusControl(node)) return true;
     else {
       const index = state.focusOrder.indexOf(key);
-      const next = state.focusOrder.slice(index + 1).concat(state.focusOrder.slice(0, Math.max(0, index)).reverse()).map(value => [...document.querySelectorAll("[data-focus-key]")].find(item => item.dataset.focusKey === value)).find(item => item && !item.disabled);
-      (next || $("productSearch"))?.focus({ preventScroll: true });
+      const restored = state.focusOrder.slice(index + 1).concat(state.focusOrder.slice(0, Math.max(0, index)).reverse()).map(value => [...document.querySelectorAll("[data-focus-key]")].find(item => item.dataset.focusKey === value)).some(focusControl);
+      if (!restored) focusControl($("productSearch"));
       announce(message("focusedItemRemoved"));
     }
   }
@@ -103,7 +107,7 @@ window.DashboardNavigation.register('center', (view) => {
     }
   }
 
-  async function api(path, options = {}, timeout = 30000) {
+  async function api(path, options = {}, timeout = 30000, snapshot = null) {
     const controller = new AbortController();
     const request = view.request(controller, options);
     const timer = setTimeout(() => controller.abort(), timeout);
@@ -115,9 +119,17 @@ window.DashboardNavigation.register('center', (view) => {
       if (!request.valid()) throw new DOMException('Inactive view', 'AbortError');
       if (!response.ok || payload?.code) throw new APIError(payload, response.status);
       if (!payload || payload.schemaVersion !== 1 || !Object.hasOwn(payload, "data")) throw new APIError({ code: "INVALID_RESPONSE", messageKey: "invalidResponse" }, response.status);
-      if (payload.centerId) state.centerId = payload.centerId;
-      if (Number.isFinite(payload.revision)) state.revision = payload.revision;
-      if (payload.observedAt) state.observedAt = payload.observedAt;
+      const target = snapshot || { centerId: state.apiCenterId, revision: state.apiRevision };
+      if (Number.isSafeInteger(payload.revision) && payload.revision >= 0) {
+        const sameCenter = !payload.centerId || payload.centerId === target.centerId;
+        if (!sameCenter || target.revision === null || payload.revision >= target.revision) {
+          target.centerId = payload.centerId || target.centerId;
+          target.revision = payload.revision;
+          if (payload.observedAt) target.observedAt = payload.observedAt;
+        }
+      }
+      // Partial refreshes cannot publish metadata for the data still on screen.
+      if (!snapshot) { state.apiCenterId = target.centerId; state.apiRevision = target.revision; }
       return payload.data;
     } finally { clearTimeout(timer); request.done(); }
   }
@@ -243,11 +255,11 @@ window.DashboardNavigation.register('center', (view) => {
     return knownNumber(capacity) && knownNumber(occupied) && occupied >= capacity ? message("queueCapacityWait") : message("queueOrderHint");
   }
 
-  async function allEntries() {
+  async function allEntries(snapshot) {
     const items = []; let cursor = null; let total = null; const seen = new Set();
     do {
       const suffix = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
-      const page = await api(`/entries?filter=all&sort=activity&limit=100${suffix}`);
+      const page = await api(`/entries?filter=all&sort=activity&limit=100${suffix}`, {}, 30000, snapshot);
       if (!page || !Array.isArray(page.items)) throw new APIError({ code: "INVALID_RESPONSE" }, 200);
       items.push(...page.items); total = page.total; cursor = page.nextCursor || null;
       if (cursor && seen.has(cursor)) throw new APIError({ code: "INVALID_RESPONSE" }, 200);
@@ -703,7 +715,20 @@ window.DashboardNavigation.register('center', (view) => {
       if (requestOwnsDispatch(request)) {
         const stop = focusKey(element("button", "text-button danger", message("stopItem")), `request:${request.requestId}:stop`); stop.type = "button"; stop.disabled = state.stale; stop.addEventListener("click", () => confirmRequestAction(request, "stop")); actions.append(stop);
       }
-      const reconcile = focusKey(element("button", "text-button", message("reconcile")), `request:${request.requestId}:reconcile`); reconcile.type = "button"; reconcile.disabled = state.stale; reconcile.addEventListener("click", () => runRequestAction(request, "reconcile")); actions.append(reconcile);
+      const reconcile = focusKey(element("button", "text-button", message("reconcile")), `request:${request.requestId}:reconcile`); reconcile.type = "button"; reconcile.disabled = state.stale || state.actionLocks.has(`request:${request.requestId}`); reconcile.addEventListener("click", async () => {
+        const focusedOnStart = document.activeElement === reconcile;
+        reconcile.disabled = true;
+        try { await runRequestAction(request, "reconcile", true); }
+        catch (error) { showStatus("requestFailed", { detail: errorText(error) }, true); }
+        finally {
+          const focused = rememberFocus();
+          const restoreOrigin = focusedOnStart && (document.activeElement === document.body || document.activeElement === reconcile || document.activeElement?.dataset.dialogId === "queueDrawer")
+            && state.drawerOpen && !document.querySelector("dialog[open]");
+          renderQueue();
+          if (focused) restoreFocus(focused);
+          else if (restoreOrigin) restoreFocus(reconcile.dataset.focusKey);
+        }
+      }); actions.append(reconcile);
     }
     item.append(body, actions); queueNodes.set(request.requestId, { signature, node: item }); return item;
   }
@@ -816,11 +841,16 @@ window.DashboardNavigation.register('center', (view) => {
     const token = ++state.refreshToken;
     const promise = (async () => {
       try {
+        const snapshot = { centerId: state.centerId, revision: state.revision, observedAt: state.observedAt };
+        const read = (path) => api(path, {}, 30000, snapshot);
         const [summary, entries, requests, operations, preferences] = await Promise.all([
-          api("/summary"), allEntries(), api("/requests?limit=100"), api("/operations"), api("/preferences"),
+          read("/summary"), allEntries(snapshot), read("/requests?limit=100"), read("/operations"), read("/preferences"),
         ]);
         if (token !== state.refreshToken) return;
         if (!summary || !Array.isArray(entries?.items) || !Array.isArray(requests?.items) || !Array.isArray(operations?.items)) throw new APIError({ code: "INVALID_RESPONSE" }, 200);
+        state.centerId = snapshot.centerId; state.revision = snapshot.revision; state.observedAt = snapshot.observedAt;
+        if (state.apiCenterId !== snapshot.centerId) { state.apiCenterId = snapshot.centerId; state.apiRevision = snapshot.revision; }
+        else state.apiRevision = Math.max(state.apiRevision ?? 0, snapshot.revision ?? 0);
         state.summary = summary; state.entries = entries.items; state.requests = requests.items; state.operations = operations.items; state.preferences = preferences; state.loading = false; state.stale = false;
         state.lastSuccessAt = state.observedAt || new Date().toISOString();
         const language = summary.language || state.preferences?.language;
@@ -894,12 +924,17 @@ window.DashboardNavigation.register('center', (view) => {
   }
 
   function openDialog(dialog) {
+    if (!dialog.open && !dialog.closest("[data-motion-exit]")) {
+      state.dialogToken += 1;
+      const form = dialog.querySelector("form"); if (form) endSubmission(form);
+      if (dialog.id === "newWorkDialog") { state.workSubmitting = false; updateGroupButtons(); }
+    }
     UI?.mountControls();
     dialog.querySelectorAll("[data-error-id]").forEach(clearFieldError); dialog.showModal();
     dialog.querySelectorAll('[type="submit"], #commitImportButton, #centerRefreshButton').forEach(reserveSubmissionWidth);
     if (!UI) dialog.querySelector("input:not([type=radio]), textarea, select")?.focus();
   }
-  function closeDialog(dialog) { if (dialog.open) dialog.close(); }
+  function closeDialog(dialog) { if (dialog.id === "importDialog") resetImportProbe(); if (dialog.open) dialog.close(); }
 
   function openContinue(entry) {
     state.menuEntryId = null; state.activeEntry = entry;
@@ -1067,32 +1102,51 @@ window.DashboardNavigation.register('center', (view) => {
     finally { endSubmission(form); }
   }
 
+  function workFormContext(form, dialog) {
+    const token = state.dialogToken;
+    const values = () => JSON.stringify({ config: formConfig(form), mode: form.elements.executionMode.value, direction: form.elements.direction?.value,
+      groups: [...form.querySelectorAll(".work-group")].map(group => ({ id: group.id, count: group.querySelector('[name="count"]').value, direction: group.querySelector('[name="direction"]').value, config: formConfig(group) })) });
+    const submitted = values();
+    return {
+      current: () => token === state.dialogToken && dialog.open,
+      unchanged: () => token === state.dialogToken && dialog.open && values() === submitted,
+      canOpenQueue: () => token === state.dialogToken && !document.querySelector("dialog[open]"),
+    };
+  }
+
   async function submitContinue(event) {
-    event.preventDefault(); const form = event.currentTarget; const entry = state.activeEntry; if (!entry) return;
+    event.preventDefault(); const form = event.currentTarget; const entry = state.activeEntry; const dialog = $("continueDialog"); if (!entry || !dialog.open) return;
+    const context = workFormContext(form, dialog);
     if (!beginSubmission(form, form.elements.executionMode.value === "enqueue" ? "submittingQueue" : "submittingStart")) return;
     try {
       await write("/requests", { kind: entry.kind === "exploration" ? "explore" : "continue", entryId: entry.entryId, sourceId: entry.sourceId, runtimeId: entry.runtimeId,
         expectedSourceRevision: entry.sourceRevision, executionMode: form.elements.executionMode.value, config: formConfig(form) });
-      closeDialog($("continueDialog")); showStatus("requestCreated"); await refresh(); openQueue();
-    } catch (error) { setFormStatus(form, message("requestFailed", { detail: errorText(error) }), true); }
-    finally { endSubmission(form); form.querySelector('[type="submit"]').disabled = !capability(entry, "execute").enabled || state.stale; }
+      const completedCurrentForm = context.unchanged();
+      if (completedCurrentForm) closeDialog(dialog);
+      showStatus("requestCreated"); await refresh();
+      if (completedCurrentForm && context.canOpenQueue()) openQueue();
+    } catch (error) { if (context.unchanged()) setFormStatus(form, message("requestFailed", { detail: errorText(error) }), true); }
+    finally { if (context.current()) { if (!context.unchanged()) setFormStatus(form, ""); endSubmission(form); form.querySelector('[type="submit"]').disabled = !capability(entry, "execute").enabled || state.stale; } }
   }
 
   async function submitNewWork(event) {
-    event.preventDefault(); const form = event.currentTarget;
+    event.preventDefault(); const form = event.currentTarget; const dialog = $("newWorkDialog"); if (!dialog.open) return;
+    const context = workFormContext(form, dialog);
     if (!beginSubmission(form, form.elements.executionMode.value === "enqueue" ? "submittingQueue" : "submittingStart")) return;
     state.workSubmitting = true;
     try {
       const groups = [...form.querySelectorAll(".work-group")].map((group) => ({ count: Number(group.querySelector('[name="count"]').value), direction: text(group.querySelector('[name="direction"]').value), config: formConfig(group) }));
       const batch = await write("/explorations/batch", { groups, executionMode: form.elements.executionMode.value }, 60000);
       for (const operation of batch.items || []) state.operations = [operation, ...state.operations.filter((item) => item.operationId !== operation.operationId)];
-      closeDialog($("newWorkDialog"));
+      const completedCurrentForm = context.unchanged();
+      if (completedCurrentForm) closeDialog(dialog);
       const items = batch.items || [], failed = items.filter(item => ["failed", "attention"].includes(item.state)).length;
       if (failed) showStatus("batchPartial", { total: items.length, failed, success: items.filter(item => item.state === "succeeded").length, pending: items.filter(item => item.state === "preparing").length }, true);
       else showStatus("explorationPrepared");
-      await refresh(); openQueue();
-    } catch (error) { setFormStatus(form, message("requestFailed", { detail: errorText(error) }), true); }
-    finally { state.workSubmitting = false; endSubmission(form); updateGroupButtons(); }
+      await refresh();
+      if (completedCurrentForm && context.canOpenQueue()) openQueue();
+    } catch (error) { if (context.unchanged()) setFormStatus(form, message("requestFailed", { detail: errorText(error) }), true); }
+    finally { if (context.current()) { state.workSubmitting = false; if (!context.unchanged()) setFormStatus(form, ""); endSubmission(form); updateGroupButtons(); } }
   }
 
   function renderProbe(candidate) {
@@ -1108,30 +1162,37 @@ window.DashboardNavigation.register('center', (view) => {
   }
 
   async function submitProbe(event) {
-    event.preventDefault(); const form = event.currentTarget; if (!beginSubmission(form, "probing")) return;
-    state.probe = null; $("commitImportButton").hidden = true; $("probeResult").hidden = true;
+    event.preventDefault(); const form = event.currentTarget; resetImportProbe();
+    const token = state.probeToken; const root = text(form.elements.root.value); const mode = form.elements.mode.value;
+    const isCurrent = () => token === state.probeToken && $("importDialog").open && root === text(form.elements.root.value) && mode === form.elements.mode.value;
+    if (!beginSubmission(form, "probing")) return;
     try {
-      const mode = form.elements.mode.value;
-      const candidate = await write("/imports/probe", { root: text(form.elements.root.value), ...(mode === "reference" ? { kindHint: "reference" } : {}) }, 60000);
+      const candidate = await write("/imports/probe", { root, ...(mode === "reference" ? { kindHint: "reference" } : {}) }, 60000);
+      if (!isCurrent()) return;
       if (!candidate?.candidateId || !candidate?.candidateHash) throw new APIError({ code: "INVALID_RESPONSE" }, 200);
       state.probe = candidate; renderProbe(candidate); $("commitImportButton").hidden = false; setFormStatus(form, message("probeReady"));
-    } catch (error) { setFormStatus(form, message("requestFailed", { detail: errorText(error) }), true); }
-    finally { endSubmission(form); }
+    } catch (error) { if (isCurrent()) setFormStatus(form, message("requestFailed", { detail: errorText(error) }), true); }
+    finally { if (isCurrent()) endSubmission(form); }
   }
 
   async function commitImport() {
-    const form = $("importForm"); if (!state.probe) return;
-    if (!beginSubmission(form, "actionPending", $("commitImportButton"))) return;
+    const form = $("importForm"); const dialog = $("importDialog"); const button = $("commitImportButton");
+    if (!state.probe || !dialog.open || button.disabled) return;
+    const probe = state.probe; const token = state.probeToken;
+    const isCurrent = () => token === state.probeToken && state.probe === probe && dialog.open;
+    if (!beginSubmission(form, "actionPending", button)) return;
     $("probeButton").disabled = true;
     try {
-      await write("/imports/commit", { candidateId: state.probe.candidateId, candidateHash: state.probe.candidateHash, mode: form.elements.mode.value === "reference" ? "reference" : "readonly", expectedRevision: state.revision }, 60000);
-      closeDialog($("importDialog")); showStatus("importComplete"); state.probe = null; await refresh();
-    } catch (error) { setFormStatus(form, message("requestFailed", { detail: errorText(error) }), true); }
-    finally { endSubmission(form, $("commitImportButton")); $("probeButton").disabled = false; }
+      await write("/imports/commit", { candidateId: probe.candidateId, candidateHash: probe.candidateHash, mode: form.elements.mode.value === "reference" ? "reference" : "readonly", expectedRevision: state.apiRevision ?? state.revision }, 60000);
+      if (isCurrent()) closeDialog(dialog);
+      showStatus("importComplete"); await refresh();
+    } catch (error) { if (isCurrent()) setFormStatus(form, message("requestFailed", { detail: errorText(error) }), true); }
+    finally { if (isCurrent()) { endSubmission(form, button); $("probeButton").disabled = false; } }
   }
 
   function sourceStatus(value, error = false) {
     const node = $("sourceManagerStatus"); node.textContent = value; node.classList.toggle("error", error);
+    return ++state.sourceStatusToken;
   }
 
   async function waitOperation(operation) {
@@ -1144,45 +1205,74 @@ window.DashboardNavigation.register('center', (view) => {
     throw new APIError({ code: "CONTEXT_UNAVAILABLE", messageKey: "operationInProgress" }, 408);
   }
 
-  async function refreshSourceManager(successKey) {
-    const entryId = state.managementEntry?.entryId; if (!entryId) return;
-    state.managementEntry = await api(`/entries/${encodeURIComponent(entryId)}`);
-    state.selectedSourceId = state.managementEntry.sourceId;
-    renderSourceManager(); sourceStatus(message(successKey)); await refresh();
+  function sourceContext() {
+    const token = state.sourceToken; const entryId = state.managementEntry?.entryId; const sourceId = state.selectedSourceId;
+    return () => token === state.sourceToken && $("sourceDialog").open && entryId === state.managementEntry?.entryId && sourceId === state.selectedSourceId;
+  }
+
+  async function refreshSourceManager(successKey, isCurrent = sourceContext()) {
+    try {
+      const entryId = state.managementEntry?.entryId; if (!entryId || !isCurrent()) return;
+      const token = ++state.sourceRefreshToken;
+      let detail;
+      try { detail = await api(`/entries/${encodeURIComponent(entryId)}`); }
+      catch (error) {
+        if (!isCurrent() || token !== state.sourceRefreshToken) return;
+        throw error;
+      }
+      if (!isCurrent() || token !== state.sourceRefreshToken) return;
+      state.managementEntry = detail;
+      state.selectedSourceId = detail.sourceId;
+      renderSourceManager(); sourceStatus(message(successKey));
+    } finally { await refresh(); }
   }
 
   async function sourceOperation(path, body, successKey = "managementComplete") {
+    const isCurrent = sourceContext();
     sourceStatus(message("operationInProgress"));
     try {
       const operation = await waitOperation(await write(path, body, 60000));
+      if (!isCurrent()) { await refresh(); return; }
       if (["attention", "failed"].includes(operation?.state)) { sourceStatus(message("operationAttention", { reason: capabilityReason(operation.reason || "CONTEXT_UNAVAILABLE") }), true); return; }
-      await refreshSourceManager(successKey);
-    } catch (error) { sourceStatus(message("requestFailed", { detail: errorText(error) }), true); }
+      await refreshSourceManager(successKey, isCurrent);
+    } catch (error) { if (isCurrent()) sourceStatus(message("requestFailed", { detail: errorText(error) }), true); }
+  }
+
+  function syncSourceActions() {
+    const busy = $("sourceManagerBody").dataset.submitting === "true";
+    for (const { button, hint, enabled, reason } of state.sourceActions) {
+      button.disabled = busy || !enabled;
+      hint.textContent = busy && enabled ? message("operationInProgress") : enabled ? "" : capabilityReason(reason);
+    }
   }
 
   function managementAction(container, labelKey, enabled, reason, action, danger = false) {
     const row = element("div", "management-action");
     const button = element("button", `button ${danger ? "danger" : "secondary"}`, message(labelKey)); button.type = "button"; button.disabled = !enabled;
     if (enabled) button.addEventListener("click", async () => {
-      const scope = $("sourceManagerBody"); if (scope.dataset.submitting === "true") return;
+      const scope = $("sourceManagerBody"); if (scope.dataset.submitting === "true") { sourceStatus(message("operationInProgress")); return; }
       scope.dataset.submitting = "true"; scope.setAttribute("aria-busy", "true");
-      const controls = [...scope.querySelectorAll("button, input")].map(node => [node, node.disabled]); controls.forEach(([node]) => { node.disabled = true; });
+      const focusedOnStart = document.activeElement === button;
+      syncSourceActions();
       const label = button.textContent; button.textContent = message("actionPending");
       try { await action(); }
-      finally { delete scope.dataset.submitting; scope.removeAttribute("aria-busy"); controls.forEach(([node, disabled]) => { if (node.isConnected) node.disabled = disabled; }); if (button.isConnected) button.textContent = label; }
+      finally { delete scope.dataset.submitting; scope.removeAttribute("aria-busy"); syncSourceActions(); if (button.isConnected) { button.textContent = label; if (focusedOnStart && (document.activeElement === document.body || document.activeElement?.dataset.dialogId === "sourceDialog") && $("sourceDialog").open) focusControl(button); } }
     });
-    row.append(button, element("small", "", enabled ? "" : capabilityReason(reason)));
+    const hint = element("small");
+    state.sourceActions.push({ button, hint, enabled, reason }); syncSourceActions();
+    row.append(button, hint);
     container.append(row);
   }
 
   function renderSourceManager() {
-    const entry = state.managementEntry; const body = clear($("sourceManagerBody")); if (!entry) return;
+    const entry = state.managementEntry; const body = clear($("sourceManagerBody")); state.sourceActions = []; if (!entry) return;
+    const isCurrent = sourceContext();
     const sources = Array.isArray(entry.sources) ? entry.sources : [];
     if (!sources.length) { body.append(element("p", "list-state", message("noSources"))); return; }
     const fieldset = element("fieldset", "source-list"); fieldset.append(element("legend", "visually-hidden", message("sourceList")));
     sources.forEach((source, index) => {
       const label = element("label", "source-choice"); const input = document.createElement("input"); input.type = "radio"; input.name = "managedSource"; input.value = source.sourceId;
-      input.checked = source.sourceId === state.selectedSourceId; input.addEventListener("change", () => { state.selectedSourceId = source.sourceId; renderSourceManager(); });
+      input.checked = source.sourceId === state.selectedSourceId; input.addEventListener("change", () => { state.sourceToken += 1; state.selectedSourceId = source.sourceId; sourceStatus(""); renderSourceManager(); });
       const title = text(source.displayName || source.rootName) || source.project || message("sourceNumber", { number: index + 1 });
       const detail = [message(`kind_${source.kind}`), source.sourceId === entry.sourceId ? message("currentSource") : "", statusLabel(source.availability === "available" ? "read_only" : "unknown"), source.project && source.project !== title ? message("sourceProject", { project: source.project }) : "", message("sourceIdShort", { id: source.sourceId.slice(-8) })].filter(Boolean).join(" · ");
       label.append(input, element("strong", "", title), element("small", "", detail)); fieldset.append(label);
@@ -1200,14 +1290,26 @@ window.DashboardNavigation.register('center', (view) => {
     }
     const reconnect = element("label", "reconnect-field"); reconnect.append(element("span", "", message("reconnectPath")));
     const root = element("input"); root.type = "text"; root.autocomplete = "off"; root.spellcheck = false; root.placeholder = message("folderPlaceholder"); reconnect.append(root, element("small", "", message("reconnectHint"))); body.append(reconnect);
+    let reconnectToken = 0; let reconnectStatusToken = null;
+    root.addEventListener("input", () => {
+      reconnectToken += 1;
+      if (reconnectStatusToken === state.sourceStatusToken) sourceStatus("");
+    });
     const actions = element("div", "management-actions"); const takeover = capability(entry, "takeover"); const release = capability(entry, "release"); const preview = capability(entry, "preview"); const previewStop = capability(entry, "previewStop"); const capture = capability(entry, "capture");
     managementAction(actions, "selectSource", !current, current ? "UNSUPPORTED" : "", async () => {
-      sourceStatus(message("actionPending")); try { await write(`/entries/${encodeURIComponent(entry.entryId)}/source-selection`, { sourceId: source.sourceId, expectedRevision: entry.revision }); await refreshSourceManager("sourceSelected"); } catch (error) { sourceStatus(message("requestFailed", { detail: errorText(error) }), true); }
+      sourceStatus(message("actionPending")); try { await write(`/entries/${encodeURIComponent(entry.entryId)}/source-selection`, { sourceId: source.sourceId, expectedRevision: entry.revision }); await refreshSourceManager("sourceSelected", isCurrent); } catch (error) { if (isCurrent()) sourceStatus(message("requestFailed", { detail: errorText(error) }), true); }
     });
     const sourceRevision = source.revision;
     managementAction(actions, "reconnectSource", current && !release.enabled, !current ? "selectCurrentFirst" : release.enabled ? "releaseFirst" : "", async () => {
-      if (!text(root.value)) { sourceStatus(message("requestFailed", { detail: message("folderPath") }), true); root.focus(); return; }
-      sourceStatus(message("probing")); try { const candidate = await write("/imports/probe", { root: text(root.value) }, 60000); await write(`/sources/${encodeURIComponent(source.sourceId)}/reconnect`, { candidateId: candidate.candidateId, candidateHash: candidate.candidateHash, expectedRevision: sourceRevision }, 60000); await refreshSourceManager("sourceReconnected"); } catch (error) { sourceStatus(message("requestFailed", { detail: errorText(error) }), true); }
+      if (!text(root.value)) { reconnectStatusToken = sourceStatus(message("requestFailed", { detail: message("folderPath") }), true); root.focus(); return; }
+      const token = reconnectToken; const isReconnectCurrent = () => isCurrent() && token === reconnectToken;
+      reconnectStatusToken = sourceStatus(message("probing"));
+      try {
+        const candidate = await write("/imports/probe", { root: text(root.value) }, 60000);
+        if (!isReconnectCurrent()) return;
+        await write(`/sources/${encodeURIComponent(source.sourceId)}/reconnect`, { candidateId: candidate.candidateId, candidateHash: candidate.candidateHash, expectedRevision: sourceRevision }, 60000);
+        await refreshSourceManager("sourceReconnected", isReconnectCurrent);
+      } catch (error) { if (isReconnectCurrent()) reconnectStatusToken = sourceStatus(message("requestFailed", { detail: errorText(error) }), true); }
     });
     managementAction(actions, "takeover", current && takeover.enabled, !current ? "selectCurrentFirst" : takeover.reason, () => sourceOperation(`/sources/${encodeURIComponent(source.sourceId)}/takeover`, { expectedRevision: sourceRevision }));
     managementAction(actions, "release", current && release.enabled, !current ? "selectCurrentFirst" : release.reason, () => sourceOperation(`/sources/${encodeURIComponent(source.sourceId)}/release`, { expectedRevision: sourceRevision }));
@@ -1222,30 +1324,59 @@ window.DashboardNavigation.register('center', (view) => {
   async function openSourceManager(entry) {
     const token = ++state.sourceToken; state.managementEntry = null; state.selectedSourceId = null; $("sourceProduct").textContent = entry.displayName || message("fieldMissing"); clear($("sourceManagerBody")); sourceStatus(message("loading")); openDialog($("sourceDialog"));
     try { const detail = await api(`/entries/${encodeURIComponent(entry.entryId)}`); if (token !== state.sourceToken || !$("sourceDialog").open) return; state.managementEntry = detail; state.selectedSourceId = detail.sourceId; renderSourceManager(); sourceStatus(""); }
-    catch (error) { if (token === state.sourceToken) sourceStatus(message("requestFailed", { detail: errorText(error) }), true); }
+    catch (error) { if (token === state.sourceToken && $("sourceDialog").open) sourceStatus(message("requestFailed", { detail: errorText(error) }), true); }
+  }
+
+  function setPreferenceFieldsDisabled(form, disabled) {
+    for (const name of ["language", "engine", "model", "effort", "productLanguage"]) form.elements[name].disabled = disabled;
+    const templates = form.querySelector(".template-controls");
+    if (templates) templates.hidden = disabled;
   }
 
   async function loadPreferences() {
-    const form = $("settingsForm"); setFormStatus(form, message("loading"));
+    const token = ++state.preferencesToken; state.preferencesRevision = null;
+    const form = $("settingsForm"); const button = form.querySelector('[type="submit"]'); button.disabled = true; setPreferenceFieldsDisabled(form, true); setFormStatus(form, message("loading"));
+    const isCurrent = () => token === state.preferencesToken && $("settingsDialog").open;
     try {
-      state.preferences = await api("/preferences");
-      form.elements.language.value = state.preferences.language || state.language;
-      fillDefaults(form); renderTemplateControls(form); setFormStatus(form, "");
-      $("defaultsTemplateHint").hidden = !state.preferences.defaultTemplateId;
-    } catch (error) { setFormStatus(form, message("requestFailed", { detail: errorText(error) }), true); }
+      const preferences = await api("/preferences");
+      if (!isCurrent()) return;
+      if (!Number.isSafeInteger(preferences?.revision) || preferences.revision < 0) throw new APIError({ code: "INVALID_RESPONSE" }, 200);
+      state.preferences = preferences;
+      // The expected revision belongs to the values loaded into this form.
+      // Background polling may update defaults, but cannot renew this edit's lease.
+      state.preferencesRevision = preferences.revision;
+      form.elements.language.value = preferences.language || state.language;
+      fillDefaults(form); renderTemplateControls(form); $("defaultsTemplateHint").hidden = !state.preferences.defaultTemplateId; setFormStatus(form, ""); setPreferenceFieldsDisabled(form, false); button.disabled = false;
+    } catch (error) { if (isCurrent()) setFormStatus(form, message("requestFailed", { detail: errorText(error) }), true); }
   }
 
   async function savePreferences(event) {
-    event.preventDefault(); const form = event.currentTarget; if (!beginSubmission(form, "saving")) return;
+    event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('[type="submit"]');
+    if (button.disabled || state.preferencesRevision === null || !$("settingsDialog").open) return;
+    const token = state.preferencesToken; const isCurrent = () => token === state.preferencesToken && $("settingsDialog").open;
+    const values = () => ({ language: form.elements.language.value, ...formConfig(form) });
+    const submitted = values();
+    if (!beginSubmission(form, "saving")) return;
     try {
-      state.preferences = await write("/preferences", { preferences: { language: form.elements.language.value, ...formConfig(form) }, expectedRevision: state.preferences?.revision ?? state.revision });
-      state.language = form.elements.language.value; closeDialog($("settingsDialog")); renderPage(); showStatus("preferencesSaved"); await refresh();
-    } catch (error) { setFormStatus(form, message("requestFailed", { detail: errorText(error) }), true); }
-    finally { endSubmission(form); }
+      const preferences = await write("/preferences", { preferences: submitted, expectedRevision: state.preferencesRevision });
+      if (!Number.isSafeInteger(preferences?.revision) || preferences.revision < 0) throw new APIError({ code: "INVALID_RESPONSE" }, 200);
+      if (isCurrent()) {
+        const unchanged = JSON.stringify(values()) === JSON.stringify(submitted);
+        state.preferences = preferences; state.language = preferences.language;
+        // Only this successful write can advance the preserved edit's lease.
+        state.preferencesRevision = preferences.revision;
+        if (unchanged) closeDialog($("settingsDialog"));
+        else setFormStatus(form, message("preferencesNewerEdits"));
+        renderPage();
+        if (unchanged) showStatus("preferencesSaved");
+      }
+      await refresh();
+    } catch (error) { if (isCurrent()) setFormStatus(form, message("requestFailed", { detail: errorText(error) }), true); }
+    finally { if (isCurrent()) endSubmission(form); }
   }
 
   function confirmAction(titleKey, messageKey, action, danger = false, name = "", actionKey = titleKey) {
-    state.confirmAction = action; $("confirmTitle").textContent = message(titleKey); $("confirmMessage").textContent = `${name ? `${message("objectConfirmation", { name })} · ` : ""}${message(messageKey)}`;
+    state.confirmAction = action; endSubmission($("confirmForm")); $("confirmActionButton").disabled = false; $("confirmTitle").textContent = message(titleKey); $("confirmMessage").textContent = `${name ? `${message("objectConfirmation", { name })} · ` : ""}${message(messageKey)}`;
     $("confirmActionButton").textContent = message(actionKey); delete $("confirmActionButton").dataset.i18n;
     $("confirmActionButton").classList.toggle("primary", !danger); $("confirmActionButton").classList.toggle("danger", danger);
     $("confirmActionButton").className = element("button", danger ? "button danger" : "button primary").className;
@@ -1256,7 +1387,7 @@ window.DashboardNavigation.register('center', (view) => {
   function confirmEntryVisibility(entry) {
     const action = entry.archived ? "restore" : "archive";
     confirmAction(`${action}Title`, `${action}Message`, async () => {
-      await write(`/entries/${encodeURIComponent(entry.entryId)}/${action}`, { expectedRevision: entry.revision ?? state.revision });
+      await write(`/entries/${encodeURIComponent(entry.entryId)}/${action}`, { expectedRevision: entry.revision ?? state.apiRevision ?? state.revision });
       showStatus(entry.archived ? "restoreSuccess" : "archiveSuccess"); await refresh();
     }, false, entry.displayName || message("fieldMissing"), action);
   }
@@ -1264,7 +1395,7 @@ window.DashboardNavigation.register('center', (view) => {
   function confirmReferenceDetach(entry) {
     const reference = entry.kind === "reference";
     confirmAction(reference ? "detachReferenceTitle" : "detachEntryTitle", reference ? "detachReferenceMessage" : "detachEntryMessage", async () => {
-      await write(`/entries/${encodeURIComponent(entry.entryId)}/detach`, { expectedRevision: entry.revision ?? state.revision });
+      await write(`/entries/${encodeURIComponent(entry.entryId)}/detach`, { expectedRevision: entry.revision ?? state.apiRevision ?? state.revision });
       showStatus(reference ? "detachReferenceSuccess" : "detachEntrySuccess"); await refresh();
     }, true, entry.displayName || message("fieldMissing"), reference ? "detachReference" : "detachEntry");
   }
@@ -1274,15 +1405,28 @@ window.DashboardNavigation.register('center', (view) => {
   }
 
   async function runRequestAction(request, action, propagate = false) {
-    const lock = `request:${request.requestId}`; if (state.actionLocks.has(lock)) return;
+    const lock = `request:${request.requestId}`;
+    const settle = async (pending) => {
+      try { return await pending; }
+      catch (error) { if (propagate) throw error; showStatus("requestFailed", { detail: errorText(error) }, true); }
+    };
+    const current = state.requestActions.get(lock);
+    if (current && current.action === action) return settle(current.promise);
+    if (state.actionLocks.has(lock)) return settle(Promise.reject(new APIError({ code: "ACTION_IN_PROGRESS", messageKey: "operationInProgress" }, 409)));
     state.actionLocks.add(lock);
     const controls = [...document.querySelectorAll("[data-focus-key]")].filter(node => node.dataset.focusKey.startsWith(`${lock}:`)); controls.forEach(node => { node.disabled = true; });
-    try {
-      const body = action === "stop" ? { expectedDispatchId: request.dispatchId } : { expectedRevision: request.revision ?? state.revision };
-      await write(`/requests/${encodeURIComponent(request.requestId)}/${action}`, body, action === "stop" ? 60000 : 30000);
-      showStatus("actionAccepted"); await refresh();
-    } catch (error) { if (propagate) throw error; showStatus("requestFailed", { detail: errorText(error) }, true); }
-    finally { state.actionLocks.delete(lock); const focused = rememberFocus(); renderQueue(); restoreFocus(focused); }
+    const pending = (async () => {
+      try {
+        const body = action === "stop" ? { expectedDispatchId: request.dispatchId } : { expectedRevision: request.revision ?? state.revision };
+        await write(`/requests/${encodeURIComponent(request.requestId)}/${action}`, body, action === "stop" ? 60000 : 30000);
+        showStatus("actionAccepted"); await refresh();
+      }
+      finally { state.actionLocks.delete(lock); queueNodes.delete(request.requestId); queueSignature = ""; const focused = rememberFocus(); renderQueue(); restoreFocus(focused); }
+    })();
+    const operation = { action, promise: pending };
+    state.requestActions.set(lock, operation);
+    try { return await settle(pending); }
+    finally { if (state.requestActions.get(lock) === operation) state.requestActions.delete(lock); }
   }
 
   async function moveRequest(index, offset, queued) {
@@ -1316,7 +1460,7 @@ window.DashboardNavigation.register('center', (view) => {
   function clearFilters() { state.filter = "all"; state.roundFilter = "all"; state.query = ""; $("productSearch").value = ""; renderPage(); }
 
   function resetImportProbe() {
-    state.probe = null; $("probeResult").hidden = true; $("commitImportButton").hidden = true; setFormStatus($("importForm"), "");
+    endSubmission($("importForm")); state.probeToken += 1; state.probe = null; $("probeButton").disabled = false; $("probeResult").hidden = true; $("commitImportButton").hidden = true; $("commitImportButton").disabled = false; setFormStatus($("importForm"), "");
   }
 
   function wire() {
@@ -1361,11 +1505,16 @@ window.DashboardNavigation.register('center', (view) => {
     $("newWorkForm").addEventListener("submit", submitNewWork); $("continueForm").addEventListener("submit", submitContinue); $("importForm").addEventListener("submit", submitProbe); $("commitImportButton").addEventListener("click", commitImport); $("settingsForm").addEventListener("submit", savePreferences);
     Array.from($("importForm").elements.mode).forEach((control) => control.addEventListener("change", resetImportProbe));
     $("importForm").elements.root.addEventListener("input", resetImportProbe);
+    $("importDialog").addEventListener("cancel", resetImportProbe);
+    $("importDialog").addEventListener("close", () => { if (!$("importDialog").open) resetImportProbe(); });
     $("confirmForm").addEventListener("submit", async (event) => {
-      event.preventDefault(); const action = state.confirmAction; if (!action || !beginSubmission($("confirmForm"))) return; const button = $("confirmActionButton");
-      try { await action(); state.confirmAction = null; closeDialog($("confirmDialog")); }
-      catch (error) { setFormStatus($("confirmForm"), message("requestFailed", { detail: errorText(error) }), true); }
-      finally { endSubmission($("confirmForm")); }
+      event.preventDefault(); const action = state.confirmAction; const button = $("confirmActionButton"); const dialog = $("confirmDialog");
+      if (!action || button.disabled || !dialog.open) return;
+      const isCurrent = () => state.confirmAction === action && dialog.open;
+      if (!beginSubmission($("confirmForm"))) return;
+      try { await action(); if (isCurrent()) { state.confirmAction = null; closeDialog(dialog); } }
+      catch (error) { if (isCurrent()) setFormStatus($("confirmForm"), message("requestFailed", { detail: errorText(error) }), true); }
+      finally { if (isCurrent()) endSubmission($("confirmForm")); }
     });
     document.querySelectorAll(".dialog-close").forEach((button) => button.addEventListener("click", () => closeDialog(button.closest("[data-dialog-id]"))));
     document.querySelectorAll("dialog").forEach((dialog) => dialog.addEventListener("click", (event) => { if (event.target !== dialog) return; const box = dialog.getBoundingClientRect(); if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) closeDialog(dialog); }));

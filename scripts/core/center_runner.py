@@ -27,7 +27,8 @@ MARKER = ".autonomous-company-center.json"
 MAX_JSON = 128 * 1024
 HEARTBEAT_TIMEOUT = 15
 CONTROL_FILES = ("scripts/core/auto-loop.sh", "scripts/core/center_runner.py", "scripts/core/stop-loop.sh",
-                 "scripts/core/engine-adapters.sh", "scripts/core/project_isolation.py", "scripts/core/isolation_workspace.py",
+                 "scripts/core/engine-adapters.sh", "scripts/core/engine-metadata.py", "scripts/core/log_redaction.py",
+                 "scripts/core/project_isolation.py", "scripts/core/isolation_workspace.py",
                  "scripts/core/isolation_proxy.py", "scripts/core/isolation_entry.py",
                  "scripts/core/isolation_media.py", "scripts/core/isolation-runtime-files.json", "scripts/core/runtime_events.py",
                  "scripts/core/product_media.py", "scripts/core/product_media_worker.cjs",
@@ -304,15 +305,27 @@ def governance_reason(root):
         return "context_unavailable"
 
 
-def execution_blocked_reason(root, since_ns, previous=None):
-    """Only a guard observation from this live loop establishes a work block."""
+def current_loop_state(root, since_ns):
+    """Ignore stale or changing state left by a previous loop invocation."""
     try:
         path = Path(root) / ".auto-loop-state"
         before = path.stat()
         if path.is_symlink() or before.st_size > 16384 or before.st_mtime_ns < since_ns:
-            return previous
+            return None
         state = dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines() if "=" in line)
         if path.stat().st_mtime_ns != before.st_mtime_ns:
+            return None
+        return state
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def execution_blocked_reason(root, since_ns, previous=None):
+    """Only a guard observation from this live loop establishes a work block."""
+    try:
+        state = current_loop_state(root, since_ns)
+        if state is None:
             return previous
         # An unavailable or incomplete observation is not a confirmed unblock.
         if not state.get("STATUS") or "PAUSE_REASON" not in state:
@@ -433,7 +446,16 @@ def preflight(root, center_id=None, allow_protected=False, require_context=True,
         if service.returncode:
             diagnostic = service.stderr.lower()
             missing_unit = "could not be found" in diagnostic or "could not find service" in diagnostic
-            no_user_manager = sys.platform == "linux" and not Path("/run/user/%s/systemd/private" % os.getuid()).exists() and "failed to connect to bus" in diagnostic
+            no_user_manager = (
+                sys.platform == "linux"
+                and not Path("/run/user/%s/systemd/private" % os.getuid()).exists()
+                and re.search(
+                    r"failed to connect to (?:user scope )?bus(?: via local transport)?: "
+                    r"(?:no medium found|no such file or directory|"
+                    r"\$dbus_session_bus_address and \$xdg_runtime_dir not defined)(?:\s|$)",
+                    diagnostic,
+                ) is not None
+            )
             if not missing_unit and not no_user_manager:
                 result["reason"] = "service_state_unknown"
                 return result
@@ -564,6 +586,41 @@ def run_owned(manifest_path, descriptor, gate):
         nonlocal stopping
         stopping = stopping or "runner_shutdown"
 
+    def cleanup_children():
+        # Use the same bounded TERM grace period even when receipt storage fails.
+        # A deadline changes the signal, never the ownership requirement.
+        cleanup_deadline = time.monotonic() + 10
+        while True:
+            owned.update(owned_children())
+            if child_identity:
+                owned[child_identity["pid"]] = child_identity
+            if child:
+                child.poll()
+            live = [value for value in owned.values() if same_process(value)]
+            while True:
+                try:
+                    reaped, _ = os.waitpid(-1, os.WNOHANG)
+                    if not reaped:
+                        break
+                except ChildProcessError:
+                    break
+            if not live:
+                return
+            expired = time.monotonic() >= cleanup_deadline
+            for value in live:
+                try:
+                    signal_owned(value, signal.SIGKILL if expired else signal.SIGTERM)
+                except OSError:
+                    pass
+            if expired:
+                try:
+                    publish("attention", reason="stop_unconfirmed")
+                except OSError:
+                    pass
+            # Orphans remain descendants of the Linux subreaper. On macOS,
+            # retain and validate every observed descendant by start identity.
+            time.sleep(0.1)
+
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, stop_signal)
     if sys.platform == "linux":
@@ -596,12 +653,9 @@ def run_owned(manifest_path, descriptor, gate):
                 stopping = stopping or str(exc)
             stopping = stopping or protective_reason(root)
             # Runtime capacity pauses are loop facts, unlike a model phase.
-            try:
-                state_text = (root / ".auto-loop-state").read_text()[:16384]
-                if "STATUS=waiting_limit" in state_text or "STATUS=circuit_break" in state_text:
-                    stopping = stopping or "provider_pause"
-            except OSError:
-                pass
+            state = current_loop_state(root, launched_at_ns) or {}
+            if state.get("STATUS") in ("waiting_limit", "circuit_break"):
+                stopping = stopping or "provider_pause"
             if not stopping:
                 blocked = execution_blocked_reason(root, launched_at_ns, receipt.get("executionBlockedReason"))
                 if blocked != receipt.get("executionBlockedReason"):
@@ -622,31 +676,7 @@ def run_owned(manifest_path, descriptor, gate):
                     except (OSError, ValueError):
                         pass
             time.sleep(0.1)
-        owned.update(owned_children())
-        # Orphaned descendants remain descendants of the Linux subreaper.
-        # On macOS retain and validate every observed descendant as well.
-        cleanup_deadline = time.monotonic() + 10
-        while True:
-            owned.update(owned_children())
-            live = [value for value in owned.values() if same_process(value)]
-            while True:
-                try:
-                    reaped, _ = os.waitpid(-1, os.WNOHANG)
-                    if not reaped:
-                        break
-                except ChildProcessError:
-                    break
-            if not live:
-                break
-            for value in live:
-                try:
-                    signal_owned(value, signal.SIGTERM if time.monotonic() < cleanup_deadline else signal.SIGKILL)
-                except OSError:
-                    pass
-            if time.monotonic() >= cleanup_deadline:
-                publish("attention", reason="stop_unconfirmed")
-            # Never free the OS slot merely because a timeout elapsed.
-            time.sleep(0.1)
+        cleanup_children()
         publish("terminal", reason=stopping or ("natural" if child.returncode == 0 else "runtime"),
                 exitCode=child.returncode, launched=launched, cleanupConfirmed=True, endedAt=now())
         return 0
@@ -660,21 +690,7 @@ def run_owned(manifest_path, descriptor, gate):
             publish("attention", reason="recovery_required")
         except OSError:
             pass
-        while True:
-            owned.update(owned_children())
-            if child_identity:
-                owned[child_identity["pid"]] = child_identity
-            live = [value for value in owned.values() if same_process(value)]
-            if not live:
-                break
-            for value in live:
-                try:
-                    signal_owned(value, signal.SIGTERM)
-                except OSError:
-                    pass
-            if child:
-                child.poll()
-            time.sleep(0.1)
+        cleanup_children()
         raise
 
 

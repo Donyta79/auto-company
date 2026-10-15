@@ -16,6 +16,8 @@ import signal
 import subprocess
 import sys
 
+from log_redaction import redact_text
+
 LIMIT = 256 * 1024
 IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 THREAD = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
@@ -28,11 +30,7 @@ def now():
 def bounded_text(value, limit=1000):
     if not isinstance(value, str):
         return ""
-    for name, secret in os.environ.items():
-        if secret and len(secret) >= 4 and any(part in name.upper() for part in ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "AUTH_TOKEN")):
-            value = value.replace(secret, "[REDACTED]")
-    value = re.sub(r"(?i)(Bearer\s+)\S+", r"\1[REDACTED]", value)
-    return value[:limit]
+    return redact_text(value)[:limit]
 
 
 def observed_config(home, thread, root):

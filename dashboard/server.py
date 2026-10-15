@@ -7,6 +7,8 @@ import argparse
 import html
 import ipaddress
 import json
+import logging
+import math
 import os
 import platform
 import re
@@ -654,6 +656,53 @@ def capture_product_media(product_id: str) -> dict[str, Any]:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(15)
+
+    def _read_json_body(self, *, allow_empty: bool = False) -> dict[str, Any]:
+        lengths = self.headers.get_all("Content-Length", [])
+        if self.headers.get_all("Transfer-Encoding", []) or len(lengths) > 1:
+            raise ValueError("Ambiguous request framing")
+        if not lengths and allow_empty:
+            return {}
+        # Only HTTP optional whitespace may surround an ASCII decimal length.
+        # int() alone also accepts signs, underscores, and non-ASCII digits.
+        length_text = lengths[0].strip(" \t") if lengths else "0"
+        if re.fullmatch(r"[0-9]+", length_text) is None:
+            raise ValueError("Invalid request size")
+        length = int(length_text)
+        if length == 0 and allow_empty:
+            return {}
+        if not 0 < length <= 1024:
+            raise ValueError("Invalid request size")
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            raise ValueError("Incomplete request body")
+
+        def pairs(items):
+            result = {}
+            for key, value in items:
+                if key in result:
+                    raise ValueError("Duplicate JSON key")
+                result[key] = value
+            return result
+
+        def invalid_constant(value):
+            raise ValueError("Nonfinite JSON number")
+
+        def finite_float(value):
+            result = float(value)
+            if not math.isfinite(result):
+                raise ValueError("Nonfinite JSON number")
+            return result
+
+        body = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs,
+                          parse_constant=invalid_constant, parse_float=finite_float)
+        if not isinstance(body, dict):
+            raise ValueError("A JSON object is required")
+        return body
+
     def _request_allowed(self) -> bool:
         address, port = self.server.server_address[:2]
         hosts = {f"localhost:{port}", f"{address}:{port}"}
@@ -661,7 +710,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             hosts.add(f"[{address}]:{port}")
         host = self.headers.get("Host", "").lower()
         origin = self.headers.get("Origin")
-        if (host not in hosts or (origin is not None and origin != f"http://{host}")
+        if (len(self.headers.get_all("Host", [])) != 1 or host not in hosts
+                or len(self.headers.get_all("Origin", [])) > 1
+                or (origin is not None and origin != f"http://{host}")
                 or self.headers.get("Sec-Fetch-Site") == "cross-site"):
             self._json({"ok": False, "error": "Only same-origin local dashboard requests are allowed."},
                        code=HTTPStatus.FORBIDDEN)
@@ -821,22 +872,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": "Actions require application/json."},
                        code=HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
             return
-        parsed = urlparse(self.path)
+        try:
+            parsed = urlparse(self.path)
+            if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment or parsed.params:
+                raise ValueError("An origin-relative write URL without parameters is required")
+        except ValueError:
+            self._json({"ok": False, "error": "Invalid write URL."}, code=HTTPStatus.BAD_REQUEST)
+            return
         path = parsed.path
         managed_marker = REPO_ROOT / ".autonomous-company-center.json"
         if path != "/api/action/refresh" and (managed_marker.exists() or managed_marker.is_symlink()):
             self._json({"ok": False, "code": "CENTER_MANAGED",
                         "error": "This runtime is managed by the product center. Use the center controls."}, code=409)
             return
+        if path not in {"/api/product-media/capture", "/api/language", "/api/action/start", "/api/action/stop", "/api/action/refresh"}:
+            self._text("Not found", code=404)
+            return
+        try:
+            body = self._read_json_body(allow_empty=path.startswith("/api/action/"))
+        except (ValueError, UnicodeError, RecursionError, OSError):
+            payload = ({"ok": False, "errorCode": "language_invalid"} if path == "/api/language"
+                       else {"ok": False, "error": "Invalid JSON request body."})
+            self._json(payload, code=HTTPStatus.BAD_REQUEST)
+            return
         if path == "/api/product-media/capture":
             if not CONTROL_LOCK.acquire(blocking=False):
                 self._json({"ok": False, "error": "A runtime action is already in progress."}, code=409)
                 return
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-                if not 0 < length <= 1024 or self.headers.get("Transfer-Encoding") or parsed.query:
-                    raise ValueError("Invalid request size")
-                body = json.loads(self.rfile.read(length).decode("utf-8"))
                 if not isinstance(body, dict) or set(body) != {"productId"} or not isinstance(body["productId"], str) or not re.fullmatch(r"[0-9a-f]{32}", body["productId"]):
                     raise ValueError("Invalid product identity")
                 status = gather_status_payload()
@@ -857,12 +920,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/language":
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-                if not 0 < length <= 1024 or self.headers.get("Transfer-Encoding"):
-                    raise ValueError("invalid request size")
-                body = json.loads(self.rfile.read(length).decode("utf-8"))
                 if (not isinstance(body, dict) or set(body) != {"language"}
-                        or body["language"] not in localization.LANGUAGES):
+                        or not isinstance(body["language"], str) or body["language"] not in localization.LANGUAGES):
                     raise ValueError("invalid language selection")
                 localization.set_language(REPO_ROOT, body["language"])
                 self._json({"ok": True, **localization.language_state(REPO_ROOT)})
@@ -871,10 +930,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except OSError:
                 self._json({"ok": False, "errorCode": "language_save_failed"}, code=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
-        if path not in {"/api/action/start", "/api/action/stop", "/api/action/refresh"}:
-            self._text("Not found", code=404)
-            return
-
         action = path.rsplit("/", 1)[-1]
         mutating = action in {"start", "stop"}
         if mutating and not CONTROL_LOCK.acquire(blocking=False):
@@ -895,8 +950,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             result = run_dashboard_action(action)
             if action == "stop" and result["ok"]:
                 pending.unlink(missing_ok=True)
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            self._json({"ok": False, "output": f"Dashboard action failed: {exc}"},
+        except (subprocess.TimeoutExpired, OSError) as error:
+            # Exception text can include private paths or command arguments.
+            logging.error("Dashboard %s action failed: %s", action, type(error).__name__)
+            self._json({"ok": False, "output": "Dashboard action failed. Check local diagnostics."},
                        code=HTTPStatus.GATEWAY_TIMEOUT)
             return
         finally:
