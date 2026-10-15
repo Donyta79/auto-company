@@ -232,10 +232,19 @@ jobs:
         run: python3 ../../scripts/ci/run.py chromium-install npx playwright install --with-deps chromium
       - name: Test Dashboard with a real browser and isolated server
         run: python3 scripts/ci/run.py dashboard-browser npm test --prefix tests/browser
-      - name: Verify published example logic and syntax
+      - name: Set up Python for example core tests
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install published example core dependencies
         run: |
-          python3 scripts/ci/run.py showcase-core node --test examples/scopefence/tests/scopefence-core.test.mjs examples/text-meter/tests/counts.test.js
-          python3 scripts/ci/run.py showcase-syntax node --check examples/scope-sheet/app.js
+          python3 scripts/ci/run.py example-venv python3 -m venv "$RUNNER_TEMP/example-core"
+          python3 scripts/ci/run.py example-dependencies "$RUNNER_TEMP/example-core/bin/python" -m pip install -r examples/disclosure-qa-spike/requirements.txt -r examples/ifc-source-preflight/requirements.txt
+      - name: Verify every published example core suite and syntax
+        run: >-
+          python3 scripts/ci/run.py showcase-core "$RUNNER_TEMP/example-core/bin/python" scripts/ci/examples.py
+          --defer ${{ needs.changes.outputs.tabledelta == 'true' && 'tabledelta' || '' }}
+          ${{ needs.changes.outputs.cuecheck == 'true' && 'cuecheck' || '' }}
       - name: Verify automatic product screenshots and process cleanup
         env:
           AUTONOMOUS_COMPANY_TEST_PRODUCT_MEDIA_BROWSER: '1'

@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,7 @@ def load(name):
 
 CHANGES = load("changes")
 GATE = load("gate")
+EXAMPLES = load("examples")
 
 
 class RoutePolicyTests(unittest.TestCase):
@@ -53,6 +55,44 @@ class RoutePolicyTests(unittest.TestCase):
         for path in (".github/workflows/autonomous-company-runtime-ci.yml", ".github/workflows/new.yml", ".github/actions/shared/action.yml", "scripts/ci/changes.py", "tests/test_ci_policy.py"):
             with self.subTest(path=path):
                 self.assertEqual(self.selected(path), set(CHANGES.ROUTES))
+
+    def test_every_example_selects_the_job_that_runs_its_core_suite(self):
+        EXAMPLES.validate_inventory()
+        for example, command in EXAMPLES.commands().items():
+            with self.subTest(example=example):
+                self.assertIn("browser", self.selected(f"examples/{example}/changed.py"))
+                self.assertTrue(command)
+        workflow = (ROOT / ".github/workflows/autonomous-company-runtime-ci.yml").read_text()
+        browser = workflow.split("  dashboard-browser:\n", 1)[1].split("  tabledelta:\n", 1)[0]
+        self.assertIn("scripts/ci/examples.py", browser)
+        for example in ("disclosure-qa-spike", "ifc-source-preflight"):
+            self.assertIn(f"-r examples/{example}/requirements.txt", browser)
+        self.assertIn("--defer ${{ needs.changes.outputs.tabledelta == 'true' && 'tabledelta' || '' }}", browser)
+        self.assertIn("${{ needs.changes.outputs.cuecheck == 'true' && 'cuecheck' || '' }}", browser)
+        for example in EXAMPLES.PRODUCT_JOBS:
+            job = workflow.split(f"  {example}:\n", 1)[1].split("  snapog:\n", 1)[0]
+            self.assertIn(f"if: needs.changes.outputs.{example} == 'true'", job)
+            self.assertIn(f"npm test --prefix examples/{example}", job)
+            self.assertEqual(GATE.JOBS[example], (example,))
+            gate = workflow.split("  ci-gate:\n", 1)[1]
+            self.assertIn(f"      - {example}\n", gate)
+
+    def test_unregistered_example_fails_instead_of_silently_skipping_core_tests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in set(EXAMPLES.commands()) | EXAMPLES.BROWSER_ONLY | {"new-example"}:
+                (root / "examples" / name).mkdir(parents=True)
+            with self.assertRaisesRegex(ValueError, "new-example"):
+                EXAMPLES.validate_inventory(root)
+
+    def test_example_core_failure_is_propagated_after_remaining_suites(self):
+        with mock.patch.object(EXAMPLES, "validate_inventory"), \
+                mock.patch.object(EXAMPLES, "commands", return_value={"a": ["fake"], "b": ["fake"]}), \
+                mock.patch.object(EXAMPLES.subprocess, "run", side_effect=[
+                    subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0),
+                ]) as run:
+            self.assertEqual(EXAMPLES.main([]), 1)
+        self.assertEqual(run.call_count, 2)
 
     def test_runtime_and_dashboard_dependency_routing(self):
         for path in ("dashboard/index.html", "dashboard/server.py", "scripts/core/localization.py", "scripts/core/usage_lib.py", "scripts/windows/start-win.ps1", "scripts/wsl/dashboard-wsl.sh", "scripts/macos/start-daemon.sh", "i18n/en/README.md", "tests/browser/smoke.js", "tests/test_dashboard_server.py"):
@@ -85,6 +125,81 @@ class RoutePolicyTests(unittest.TestCase):
         self.assertIn("--no-renames", call.call_args.args)
         self.assertIn("-z", call.call_args.args)
         self.assertEqual(self.selected(*found), {"runtime", "browser", "snapog"})
+
+
+class ExampleInventoryTests(unittest.TestCase):
+    def test_core_inventory_and_browser_catalog_cover_the_same_examples(self):
+        source = (ROOT / "tests/browser/showcase.spec.js").read_text(encoding="utf-8")
+        catalog = re.search(r"const catalogSlugs = \[(.*?)\];", source, re.S).group(1)
+        browser_examples = set(re.findall(r'"([a-z0-9-]+)"', catalog))
+        self.assertEqual(browser_examples, set(EXAMPLES.commands()) | EXAMPLES.BROWSER_ONLY)
+        self.assertFalse(set(EXAMPLES.commands()) & EXAMPLES.BROWSER_ONLY)
+        self.assertTrue(EXAMPLES.PRODUCT_JOBS <= set(EXAMPLES.NODE_TESTS))
+
+    def fixture(self, root):
+        for name in set(EXAMPLES.commands()) | EXAMPLES.BROWSER_ONLY:
+            (root / "examples" / name).mkdir(parents=True)
+        for name, files in {**EXAMPLES.NODE_TESTS, **EXAMPLES.SYNTAX}.items():
+            for filename in files:
+                path = root / "examples" / name / filename
+                path.parent.mkdir(exist_ok=True)
+                path.touch()
+        for name, tests in EXAMPLES.PYTHON_TESTS.items():
+            for test in tests:
+                path = root / "examples" / name / ("/".join(test.split(".")[:2]) + ".py")
+                path.parent.mkdir(exist_ok=True)
+                path.touch()
+
+    def test_missing_registered_core_file_fails_inventory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            EXAMPLES.validate_inventory(root)
+            for name, filename in (("chart-proof", "tests/core.test.cjs"),
+                                   ("field-return-audit", "tests/test_server.py"),
+                                   ("scope-sheet", "app.js")):
+                path = root / "examples" / name / filename
+                path.unlink()
+                with self.subTest(filename=filename), self.assertRaisesRegex(ValueError, name):
+                    EXAMPLES.validate_inventory(root)
+                path.touch()
+
+    def test_deleted_registered_example_fails_inventory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            (root / "examples/family-art-show").rmdir()
+            with self.assertRaisesRegex(ValueError, "family-art-show"):
+                EXAMPLES.validate_inventory(root)
+
+    def test_selected_product_jobs_are_deferred_but_other_suites_still_run(self):
+        commands = {name: ["fake", name] for name in ("cuecheck", "other", "tabledelta")}
+        for deferred in ([], ["cuecheck"], ["tabledelta"], ["cuecheck", "tabledelta"]):
+            with self.subTest(deferred=deferred), \
+                    mock.patch.object(EXAMPLES, "validate_inventory"), \
+                    mock.patch.object(EXAMPLES, "commands", return_value=commands), \
+                    mock.patch.object(EXAMPLES.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+                self.assertEqual(EXAMPLES.main(["--defer", *deferred]), 0)
+                self.assertEqual([call.args[0][1] for call in run.call_args_list],
+                                 sorted(set(commands) - set(deferred)))
+                for call in run.call_args_list:
+                    self.assertEqual(call.kwargs["cwd"], ROOT / "examples" / call.args[0][1])
+                    self.assertIs(call.kwargs["check"], False)
+
+    def test_non_product_suite_cannot_be_deferred(self):
+        with self.assertRaises(SystemExit) as raised, mock.patch.object(EXAMPLES.subprocess, "run") as run:
+            EXAMPLES.main(["--defer", "scopefence"])
+        self.assertEqual(raised.exception.code, 2)
+        run.assert_not_called()
+
+    def test_launch_failure_is_reported_after_remaining_suites(self):
+        with mock.patch.object(EXAMPLES, "validate_inventory"), \
+                mock.patch.object(EXAMPLES, "commands", return_value={"a": ["missing"], "b": ["fake"]}), \
+                mock.patch.object(EXAMPLES.subprocess, "run", side_effect=[
+                    OSError("missing executable"), subprocess.CompletedProcess([], 0),
+                ]) as run:
+            self.assertEqual(EXAMPLES.main([]), 1)
+        self.assertEqual(run.call_count, 2)
 
 
 class GitEventTests(unittest.TestCase):
