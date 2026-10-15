@@ -680,14 +680,15 @@ window.DashboardNavigation.register('journal', (view) => {
     const retryStop = data?.control?.stopUnconfirmed === true;
     const locked = !data || readOnly() || (unavailable && !retryStop) || Boolean(action || state.mediaAction);
     renderRuntimeState();
-    $('startButton').disabled = locked || retryStop || !['stopped', 'inactive'].includes(process);
-    $('stopButton').disabled = locked || (!retryStop && process !== 'running');
-    iconLabel($('startButton'), 'play', message(action === 'start' ? 'starting' : 'start'));
-    iconLabel($('stopButton'), 'square', message(action === 'stop' ? 'stopping' : 'stop'));
-    $('startButton').title = $('stopButton').title = readOnly() ? message('readOnly') : unavailable ? message('statusUnavailable') : '';
-    $('startButton').hidden = scope.center || readOnly();
-    $('stopButton').hidden = scope.center || readOnly();
+    const nextAction = action || (retryStop || process === 'running' ? 'stop' : 'start');
+    const button = $('runtimeActionButton');
+    button.dataset.action = nextAction;
+    button.disabled = locked || (nextAction === 'stop' ? !retryStop && process !== 'running' : !['stopped', 'inactive'].includes(process));
+    iconLabel(button, nextAction === 'stop' ? 'square' : 'play', message(action === 'start' ? 'starting' : action === 'stop' ? 'stopping' : nextAction));
+    button.title = readOnly() ? message('readOnly') : unavailable ? message('statusUnavailable') : '';
+    button.setAttribute('aria-busy', String(Boolean(action)));
     $('runtimeControls').hidden = scope.center || readOnly();
+    if ($('projectRuntimeStatus')) $('projectRuntimeStatus').hidden = !scope.center && !readOnly();
     $('refreshButton').disabled = Boolean(state.refreshPending || state.action);
     $('modeNote').textContent = data ? message(scope.center ? centerModeKey() : readOnly() ? 'preview' : 'live') : '';
     $('autoRefresh').disabled = Boolean(data && readOnly() && !scope.center);
@@ -925,6 +926,8 @@ window.DashboardNavigation.register('journal', (view) => {
     if (signature === sidebarSignature) return;
     sidebarSignature = signature;
     const switcher = $('productSwitcherButton');
+    const controls = $('runtimeControls');
+    controls.remove();
     const sidebar = clear($('projectSidebar'));
     const data = state.data;
     const overview = element('section', 'sidebar-block project-overview');
@@ -942,7 +945,7 @@ window.DashboardNavigation.register('journal', (view) => {
     const status = element('div', 'project-runtime-status');
     status.id = 'projectRuntimeStatus';
     status.append(progressIcon(runtimeStateValue(), runtimeLabel(), true), element('span', '', runtimeLabel()));
-    identity.append(status);
+    identity.append(status, controls);
     overview.append(identity, description);
     const evidence = element('p', 'sidebar-note', runtimeEvidence()); evidence.id = 'runtimeEvidence'; evidence.hidden = !evidence.textContent; overview.append(evidence);
     const iconWarning = iconPublicationWarning(media?.icon);
@@ -1020,7 +1023,7 @@ window.DashboardNavigation.register('journal', (view) => {
     document.querySelectorAll('[data-i18n-placeholder]').forEach((node) => { node.placeholder = message(node.dataset.i18nPlaceholder); });
     $('centerContextNav').hidden = !scope.center;
     document.body.classList.toggle('center-journal', scope.center);
-    $('journalBackLink').hidden = !scope.center;
+    $('journalBackLink').hidden = false;
     const brand = document.querySelector('.brand');
     brand.href = '/center';
     const previewCenter = new URLSearchParams(location.search).get('center');
@@ -1030,6 +1033,7 @@ window.DashboardNavigation.register('journal', (view) => {
         if (target.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(target.hostname) && target.pathname === '/center' && !target.username && !target.password && !target.search && !target.hash) brand.href = target.href;
       } catch (_) {}
     }
+    $('journalBackLink').href = brand.href;
     for (const [id, name] of [['tab-work', 'notebook-pen'], ['tab-usage', 'chart-no-axes-column'], ['tab-logs', 'terminal']]) iconLabel($(id), name, $(id).textContent);
     $('refreshButton').replaceChildren(icon('refresh-cw'));
     $('closeSettingsButton').replaceChildren(icon('x'));
@@ -1438,7 +1442,7 @@ window.DashboardNavigation.register('journal', (view) => {
     return promise;
   }
   async function runAction(action) {
-    if ($(action === 'start' ? 'startButton' : 'stopButton').disabled || state.action) return;
+    if ($('runtimeActionButton').disabled || $('runtimeActionButton').dataset.action !== action || state.action) return;
     state.action = action;
     clearTimeout(state.timer);
     renderRuntime();
@@ -1472,8 +1476,9 @@ window.DashboardNavigation.register('journal', (view) => {
   });
   state.elapsedTimer = setInterval(updateElapsed, 1000);
   $('refreshButton').addEventListener('click', refresh);
-  $('startButton').addEventListener('click', () => runAction('start'));
-  $('stopButton').addEventListener('click', () => {
+  $('runtimeActionButton').addEventListener('click', () => {
+    if ($('runtimeActionButton').disabled) return;
+    if ($('runtimeActionButton').dataset.action === 'start') { runAction('start'); return; }
     $('stopConfirmMessage').textContent = message('stopConfirmMessage', { name: state.data?.project?.displayName || state.data?.project?.name || message('noProject') });
     $('stopConfirmDialog').showModal();
   });
