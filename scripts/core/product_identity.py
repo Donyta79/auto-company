@@ -22,6 +22,8 @@ import uuid
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from usage_lib import read_usage_records
+
 ID = re.compile(r"[0-9a-f]{32}\Z")
 CYCLE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 PROJECT = re.compile(r"projects/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\Z")
@@ -459,17 +461,14 @@ def recover_cycles(root):
         return []
     recovered = []
     with transaction(root) as state:
-        completed = {}
-        usage = safe_path(root, "logs/usage.jsonl")
-        if usage.is_file():
-            with usage.open(encoding="utf-8") as source:
-                for line in source:
-                    try:
-                        record = json.loads(line)
-                        if record.get("kind") == "cycle_usage" and record.get("status") in TERMINAL:
-                            completed[record["cycle_id"]] = record
-                    except (ValueError, KeyError, TypeError, AttributeError):
-                        continue
+        # Validate the same durable evidence as usage startup before closing any
+        # reservation. Corrupt or conflicting rows must not permanently relabel
+        # a cycle while the later accounting preflight refuses that ledger.
+        records, errors = read_usage_records(safe_path(root, "logs/usage.jsonl"))
+        if errors:
+            raise ValueError("usage ledger contains invalid records; repair it before recovering product cycles")
+        completed = {record["cycle_id"]: record for record in records
+                     if record.get("status") in TERMINAL}
         for row in state["cycles"].values():
             if row["state"] not in OPEN:
                 continue

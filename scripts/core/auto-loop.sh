@@ -160,11 +160,7 @@ loop_sleep() {
 }
 
 check_usage_limit() {
-    local output="$1"
-    if echo "$output" | grep -qi "usage limit\|rate limit\|too many requests\|resource_exhausted\|overloaded\|quota\|429\|billing\|insufficient credits"; then
-        return 0
-    fi
-    return 1
+    printf '%s' "$1" | python3 "$SCRIPT_DIR/engine-metadata.py" "$ENGINE" --usage-limit
 }
 
 check_stop_requested() {
@@ -317,7 +313,7 @@ cleanup() {
         # Preserve already emitted evidence after the owned process tree exits.
         if [ -n "${ADAPTER_OUTPUT_FILE:-}" ] && [ -f "$ADAPTER_OUTPUT_FILE" ] &&
            [ -f "${USAGE_FILE}.pending" ]; then
-            ADAPTER_OUTPUT=$(adapter_redact < "$ADAPTER_OUTPUT_FILE")
+            ADAPTER_OUTPUT=$(adapter_redact --structured < "$ADAPTER_OUTPUT_FILE")
             printf '%s\n' "$ADAPTER_OUTPUT" > "$cycle_log"
             ADAPTER_RESULT_SOURCE="$ADAPTER_OUTPUT"
             ADAPTER_EXIT_CODE=130
@@ -886,7 +882,7 @@ Resume the work and phase in the current consensus. First-exploration rules appl
         # Restore consensus on hard failure
         restore_consensus
 
-        if check_usage_limit "$OUTPUT"; then
+        if [ "$ADAPTER_STATUS" = "error" ] && check_usage_limit "$OUTPUT"; then
             cycle_has_usage_limit=1
         fi
     fi

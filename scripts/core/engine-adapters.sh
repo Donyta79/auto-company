@@ -61,21 +61,15 @@ adapter_reset_result() {
 }
 
 adapter_redact() {
-    local value secret_name secret
-    value=$(cat)
-    for secret_name in \
-        OPENAI_COMPATIBLE_API_KEY \
-        OPENAI_API_KEY \
-        CODEX_API_KEY \
-        ANTHROPIC_API_KEY \
-        ANTHROPIC_AUTH_TOKEN \
-        CURSOR_API_KEY; do
-        secret="${!secret_name:-}"
-        if [ -n "$secret" ]; then
-            value="${value//"$secret"/[REDACTED]}"
-        fi
-    done
-    printf '%s' "$value"
+    # Explicit assignments preserve the old coverage for shell-local provider
+    # credentials; custom deployment credentials are inherited from the environment.
+    OPENAI_COMPATIBLE_API_KEY="${OPENAI_COMPATIBLE_API_KEY:-}" \
+    OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
+    CODEX_API_KEY="${CODEX_API_KEY:-}" \
+    ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+    ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-}" \
+    CURSOR_API_KEY="${CURSOR_API_KEY:-}" \
+        python3 "$ENGINE_ADAPTER_DIR/log_redaction.py" "$@"
 }
 
 adapter_is_enabled() {
@@ -381,7 +375,7 @@ adapter_execute() {
     ADAPTER_EXIT_CODE="$CYCLE_SUPERVISOR_EXIT_CODE"
     ADAPTER_TIMED_OUT="$CYCLE_SUPERVISOR_TIMED_OUT"
 
-    ADAPTER_OUTPUT=$(adapter_redact < "$output_file")
+    ADAPTER_OUTPUT=$(adapter_redact --structured < "$output_file")
     rm -f "$output_file"
     ADAPTER_OUTPUT_FILE=""
     if [ "$ADAPTER_TIMED_OUT" -eq 1 ]; then

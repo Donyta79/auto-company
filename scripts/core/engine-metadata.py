@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 from typing import Any
 
@@ -33,6 +34,65 @@ def documents(raw: str) -> list[dict[str, Any]]:
             except json.JSONDecodeError:
                 continue
     return [value for value in values if isinstance(value, dict)]
+
+
+LIMIT_CODES = {
+    "rate_limit_exceeded", "rate_limit_error", "usage_limit_reached",
+    "insufficient_quota", "resource_exhausted", "overloaded_error",
+    "billing_hard_limit_reached", "insufficient_credits",
+}
+LIMIT_MESSAGE = re.compile(
+    r"\b(?:HTTP(?:/\d(?:\.\d)?)?\s+429|429\s+Too Many Requests|Too Many Requests|"
+    r"(?:rate|usage) limit (?:exceeded|reached)|"
+    r"(?:you(?:'ve| have) (?:hit|reached)|(?:you )?exceeded) your (?:usage limit|current quota)|"
+    r"quota (?:exceeded|exhausted)|insufficient (?:credits|quota)|"
+    r"(?:server|API) (?:is )?overloaded|billing hard limit (?:reached|exceeded))\b",
+    re.IGNORECASE,
+)
+
+
+def limit_error(value: Any) -> bool:
+    """Read only provider error fields, never tool output or assistant prose."""
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            if any(str(item.get(key, "")).lower() in LIMIT_CODES for key in ("code", "type")):
+                return True
+            if any(str(item.get(key, "")) == "429" for key in ("status", "status_code")):
+                return True
+            pending.extend(item[key] for key in ("error", "errors", "message") if key in item)
+        elif isinstance(item, list):
+            pending.extend(item)
+        elif isinstance(item, str) and (item.lower() in LIMIT_CODES or LIMIT_MESSAGE.search(item)):
+            return True
+    return False
+
+
+def usage_limited(raw: str) -> bool:
+    items = documents(raw)
+    # The final provider outcome wins over transient errors recovered by the CLI.
+    for item in reversed(items):
+        kind = item.get("type")
+        if kind == "turn.completed":
+            return False
+        if kind in {"turn.failed", "error"}:
+            return limit_error(item)
+        if kind == "result" or (kind is None and ("status" in item or "is_error" in item)):
+            failed = (item.get("status") == "error" or item.get("is_error") is True
+                      or str(item.get("subtype", "")).startswith("error"))
+            return failed and (limit_error(item) or limit_error(item.get("result")))
+        if "error" in item and kind is None:
+            return limit_error(item)
+    if items:
+        return False
+    # Some CLIs fail before emitting JSON. Require a diagnostic at line start;
+    # bare billing/quota/429 mentions in build failures are not limit evidence.
+    for line in raw.splitlines():
+        diagnostic = re.sub(r"^\s*(?:error\s*:\s*)?", "", line, flags=re.IGNORECASE)
+        if LIMIT_MESSAGE.match(diagnostic) or diagnostic.lower() in LIMIT_CODES:
+            return True
+    return False
 
 
 def usage_fields(item: dict[str, Any], engine: str) -> dict[str, Any]:
@@ -72,7 +132,8 @@ def normalize(engine: str, raw: str) -> dict[str, Any]:
                 values = [metric[field] for metric in metrics]
                 result[field] = sum(values) if all(value is not None for value in values) else None
             result.update(status="success", subtype="success", type="turn.completed")
-        if failures:
+        outcomes = [item for item in items if item.get("type") in {"turn.completed", "turn.failed"}]
+        if outcomes and outcomes[-1].get("type") == "turn.failed":
             result.update(status="error", subtype="turn.failed", type="turn.failed")
             error = failures[-1].get("error")
             result["result"] = str(error.get("message", "")) if isinstance(error, dict) else str(error or "")
@@ -101,7 +162,10 @@ def normalize(engine: str, raw: str) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    metadata = normalize(sys.argv[1], sys.stdin.read())
+    raw = sys.stdin.read()
+    if sys.argv[2:] == ["--usage-limit"]:
+        sys.exit(0 if usage_limited(raw) else 1)
+    metadata = normalize(sys.argv[1], raw)
     # NUL-delimited values preserve multiline results without shell evaluation.
     for key in ("result", "cost_usd", "input_tokens", "output_tokens", "total_tokens", "subtype", "type", "status"):
         value = metadata[key]

@@ -389,6 +389,29 @@ printf '%s\n' "$ADAPTER_OUTPUT"
         self.assertFalse(ledger.with_name(ledger.name + ".pending").exists())
 
     @wsl_bash_contract
+    def test_loop_signal_interruption_preserves_redacted_structured_usage(self) -> None:
+        payload = json.dumps({"type": "result", "subtype": "success",
+                              "result": "Authorization: Bearer fictional-interrupted-token",
+                              "usage": {"input_tokens": 120, "output_tokens": 5}, "total_cost_usd": 0.5})
+        process = self.start_fake_loop(
+            f"printf '%s\\n' '{payload}'\n" + 'touch "$FAKE_FRAMEWORK/provider-called"\nsleep 30\n')
+        self.wait_for_loop(lambda: (self.workspace / "provider-called").exists(), process)
+        process.terminate()
+        output = process.communicate(timeout=15)
+        self.assertEqual(process.returncode, 0, output)
+        ledger = self.workspace / "logs" / "usage.jsonl"
+        record = json.loads(ledger.read_text().splitlines()[0])
+        self.assertEqual(record["status"], "interrupted")
+        self.assertEqual(record["usage"]["input_tokens"], 120)
+        self.assertEqual(record["usage"]["output_tokens"], 5)
+        self.assertEqual(record["usage"]["total_tokens"], 125)
+        self.assertEqual(record["cost_usd"], 0.5)
+        self.assertFalse(ledger.with_name(ledger.name + ".pending").exists())
+        cycle_log = next((self.workspace / "logs").glob("cycle-*.log")).read_text()
+        self.assertNotIn("fictional-interrupted-token", cycle_log)
+        self.assertIn("Bearer [REDACTED]", cycle_log)
+
+    @wsl_bash_contract
     def test_claude_accepts_current_cli_permission_modes(self) -> None:
         for mode in (
             "acceptEdits",
@@ -422,13 +445,15 @@ printf '%s\n' "$ADAPTER_OUTPUT"
             cli.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
             cli.chmod(cli.stat().st_mode | stat.S_IXUSR)
 
+        # Resolve against the fixture environment, not host login/startup files.
         script = 'set -euo pipefail; source "$ADAPTER_PATH"; engine_adapter_resolve'
         completed = subprocess.run(
-            ["bash", "-lc", script],
+            ["bash", "--noprofile", "--norc", "-c", script],
             cwd=REPO_ROOT,
             env=self.base_env(
                 "codex",
                 CODEX_BIN="",
+                BASH_ENV="",
                 HOME=str(test_home),
                 PATH=f"{path_bin}:{os.environ.get('PATH', '')}",
             ),
@@ -452,13 +477,15 @@ printf '%s\n' "$ADAPTER_OUTPUT"
             cli.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
             cli.chmod(cli.stat().st_mode | stat.S_IXUSR)
 
+        # Resolve against the fixture environment, not host login/startup files.
         script = 'set -euo pipefail; source "$ADAPTER_PATH"; engine_adapter_resolve'
         completed = subprocess.run(
-            ["bash", "-lc", script],
+            ["bash", "--noprofile", "--norc", "-c", script],
             cwd=REPO_ROOT,
             env=self.base_env(
                 "codex",
                 CODEX_BIN="",
+                BASH_ENV="",
                 HOME=str(test_home),
                 PATH="/usr/bin:/bin",
             ),

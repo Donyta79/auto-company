@@ -89,9 +89,14 @@ Each `logs/cycle-<id>.log` has a sibling `logs/cycle-<id>.json` record:
 
 Unknown numeric values are JSON `null`, not strings such as `"N/A"`. This sidecar is the only engine metadata input to structured usage, budgets, and `/api/usage`; those consumers do not parse provider output. The raw cycle log is also redacted before it is written.
 
+Adapter logs, normalized result/error strings, and runtime event projections share a best-effort policy: the six provider credential variables are masked at any nonempty length; other exported variables whose names contain `TOKEN`, `SECRET`, `PASSWORD`, or `API_KEY` are masked when their values are at least four characters. Bearer token text is masked even without a matching environment value. JSON/JSONL string content is redacted after decoding so escaped credentials cannot bypass the filter and typed usage numbers/nulls remain parseable.
+Standard JSON-escaped spellings are also masked in unstructured diagnostics. Shell-local provider credentials retain their prior coverage; custom credentials must be exported.
+
+This does not sanitize arbitrary files written by providers, their private temporary capture files, or arbitrary encoded/unknown secrets, and is not an OS sandbox.
+
 Codex uses `exec --json` and reads the `turn.completed.usage` object; human-readable `tokens used` text is not an accounting source. Input and output tokens are recorded separately, cached input is not counted twice, and absent USD cost remains unknown. This matches the [official Codex JSONL contract](https://learn.chatgpt.com/docs/non-interactive-mode#make-output-machine-readable). Claude includes reported cache-read and cache-creation input buckets in its input total. Multiple OpenAI-compatible requests contribute to a cycle total only when every request supplies that metric; a missing metric stays unknown. Usage already reported when the local tool-turn limit is reached is retained, while a failed HTTP request makes the affected cycle totals unknown.
 
-Provider `is_error`, error subtypes, and Codex `turn.failed` events cause a failed Cycle even if the process exits zero. Nonzero process exit and supervisor timeout take precedence over provider success. Missing or malformed structured metadata is an adapter error. The loop still applies its existing consensus-based soft-timeout policy separately.
+Provider `is_error`, error subtypes, and a final Codex `turn.failed` event cause a failed Cycle even if the process exits zero. A later `turn.completed` takes precedence over an earlier recovered Codex failure. Nonzero process exit and supervisor timeout take precedence over provider success. Missing or malformed structured metadata is an adapter error. The loop still applies its existing consensus-based soft-timeout policy separately.
 
 ## Verification without real providers
 
