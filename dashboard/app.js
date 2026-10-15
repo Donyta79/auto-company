@@ -1023,7 +1023,7 @@ window.DashboardNavigation.register('journal', (view) => {
     document.querySelectorAll('[data-i18n-placeholder]').forEach((node) => { node.placeholder = message(node.dataset.i18nPlaceholder); });
     $('centerContextNav').hidden = !scope.center;
     document.body.classList.toggle('center-journal', scope.center);
-    $('journalBackLink').hidden = !scope.center;
+    $('journalBackLink').hidden = false;
     const brand = document.querySelector('.brand');
     brand.href = '/center';
     const previewCenter = new URLSearchParams(location.search).get('center');
@@ -1033,6 +1033,7 @@ window.DashboardNavigation.register('journal', (view) => {
         if (target.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(target.hostname) && target.pathname === '/center' && !target.username && !target.password && !target.search && !target.hash) brand.href = target.href;
       } catch (_) {}
     }
+    $('journalBackLink').href = brand.href;
     for (const [id, name] of [['tab-work', 'notebook-pen'], ['tab-usage', 'chart-no-axes-column'], ['tab-logs', 'terminal']]) iconLabel($(id), name, $(id).textContent);
     $('refreshButton').replaceChildren(icon('refresh-cw'));
     $('closeSettingsButton').replaceChildren(icon('x'));

@@ -37,19 +37,30 @@ test("one sidebar control and right-aligned tabs stay clear of the brand at narr
   await expect(page.locator('.topbar #runtimeControls')).toHaveCount(0);
   await expect(page.locator('#projectSidebar .project-identity #runtimeActionButton')).toBeVisible();
   await expect(page.locator('#readOnlyIndicator')).toBeHidden();
+  await expect(page.locator('#journalBackLink')).toBeVisible();
+  await expect(page.locator('#journalBackLink')).toHaveJSProperty('href', await page.locator('.brand').evaluate(node => node.href));
   for (const width of [1280, 1001, 1000, 760, 390, 360]) {
     await page.setViewportSize({ width, height: 900 });
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), { message: `No horizontal overflow at ${width}px` }).toBe(true);
     const bounds = await page.evaluate(() => {
       const rect = selector => document.querySelector(selector).getBoundingClientRect().toJSON();
       return { brand: rect('.brand'), tools: rect('.workspace-tools'), header: rect('.topbar'),
         navigation: rect('.navline'), tabs: rect('.ac-tabs-host'), name: rect('#projectName'),
-        button: rect('#runtimeActionButton'), title: rect('.workspace-project-heading'),
+        button: rect('#runtimeActionButton'), title: rect('.workspace-project-heading'), back: rect('#journalBackLink'),
+        arrow: rect('#journalBackLink .ui-icon'),
         overflow: document.documentElement.scrollWidth > innerWidth };
     });
     expect(bounds.brand.right).toBeLessThanOrEqual(bounds.tools.left);
     expect(bounds.brand.top).toBeGreaterThanOrEqual(bounds.header.top);
     expect(bounds.name.right).toBeLessThanOrEqual(bounds.button.left);
     expect(bounds.navigation.right - bounds.tabs.right).toBeLessThanOrEqual(20);
+    const inset = width <= 760 ? 4 : 8;
+    expect(bounds.back.width).toBe(32);
+    expect(bounds.back.height).toBe(32);
+    expect(bounds.back.left - bounds.navigation.left).toBeCloseTo(inset, 1);
+    expect(bounds.back.top - bounds.navigation.top).toBeCloseTo(inset, 1);
+    expect(bounds.arrow.left + bounds.arrow.width / 2).toBeCloseTo(bounds.back.left + 16, 1);
+    expect(bounds.arrow.top + bounds.arrow.height / 2).toBeCloseTo(bounds.back.top + 16, 1);
     if (width > 760) expect(bounds.title.right).toBeLessThanOrEqual(bounds.tabs.left);
     expect(bounds.overflow).toBe(false);
   }

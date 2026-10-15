@@ -425,7 +425,10 @@ html[data-ui=shadcn] #settingsForm { padding: 0; gap: 0; display: flex; flex-dir
 .settings-trigger { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 36px; width: 36px; min-width: 36px; height: 36px; padding: 0; }
 .settings-trigger .ui-icon { display: block; width: 20px; height: 20px; }
 .topbar .header-actions { gap: 16px; }
-.topbar .journal-back-link { justify-content: center; flex: 0 0 32px; width: 32px; min-width: 32px; padding: 0; }
+.topbar .journal-back-link { position: relative; align-items: center; justify-content: center; flex: 0 0 32px; width: 32px; min-width: 32px; height: 32px; margin-left: -8px; padding: 0; border-radius: 4px; }
+@media (pointer: coarse) {
+  .topbar .journal-back-link::before { content: ''; position: absolute; inset: -6px; }
+}
 .local-menu { min-height: 32px; }
 .project-sidebar { border-radius: 12px; background: #fff; box-shadow: 0 0 16px rgb(16 38 89 / .07); }
 .current-cycle { display: block; border: 0; }
