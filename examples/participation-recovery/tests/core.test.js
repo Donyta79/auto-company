@@ -77,9 +77,12 @@ test('中文完整交接、个人参加指引、负责人任务可以实际生�
   assert.throws(() => core.buildOwnerHandoff(state, '未分配人'), /尚未分配/);
 });
 
-test('导入拒绝早于所确认路径、场次或资源修订的确认时间', () => {
+test('导入拒绝早于所确认路径、场次或资源修订的确认时间', context => {
+  context.mock.timers.enable({ apis: ['Date'], now: new Date('2026-01-01T00:00:00Z') });
   for (const type of ['path', 'session', 'resource']) {
     let state = readyProject();
+    // Keep earlier evidence before the revision whose confirmation boundary is tested.
+    context.mock.timers.tick(1000);
     if (type === 'path') state = core.editPath(state, 'full', { label: '已变更路径名称' }, '构造路径变更');
     else if (type === 'session') state = core.updateSession(state, 'main', { title: '已变更场次名称' }, '构造场次变更');
     else { state = core.updateResource(state, 'route', { owner: '接任负责人' }, '构造资源变更'); state = prove(state, 'route'); }

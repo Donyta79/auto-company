@@ -4,9 +4,9 @@ Normal delivery registration and normal cycle finalization automatically capture
 supported products. A model does not need to invoke a preview or screenshot tool.
 Media failures are diagnostics and do not change checks or AI cycle results.
 
-Node 20+ and Playwright Chromium are optional screenshot dependencies. This uses
-the same pinned Playwright version as the Dashboard browser checks, without
-requiring a Python browser package or an image-generation model. Install from the
+Node 20+ and Playwright Chromium are optional screenshot dependencies. This runtime
+and the Dashboard browser checks each pin their own Playwright version and require
+its matching Chromium, without a Python browser package or an image-generation model. Install from the
 framework root in the **same OS/runtime** that runs the product:
 
 ```sh

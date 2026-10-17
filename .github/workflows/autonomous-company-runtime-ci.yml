@@ -55,7 +55,7 @@ jobs:
           }
       - name: Save failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-config-failure
           path: ci-results/
@@ -79,7 +79,7 @@ jobs:
         run: python3 scripts/ci/run.py python-tests-2 python3 scripts/check_skill_resources.py
       - name: Save failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-tests-failure
           path: ci-results/
@@ -114,7 +114,7 @@ jobs:
         run: python3 scripts/ci/run.py macos-runtime-3 python3 -m unittest discover -s tests -p test_launchd_installation.py -v
       - name: Save failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-runtime-failure
           path: ci-results/
@@ -145,7 +145,7 @@ jobs:
           CI_SCRIPT
       - name: Save failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: shell-syntax-failure
           path: ci-results/
@@ -161,7 +161,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           package-manager-cache: false
@@ -194,7 +194,7 @@ jobs:
         run: python3 scripts/ci/run.py dashboard-dates node --test tests/test_dashboard_dates.js
       - name: Save failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: shell-contracts-failure
           path: ci-results/
@@ -211,7 +211,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           package-manager-cache: false
@@ -230,6 +230,9 @@ jobs:
       - name: Install Chromium
         working-directory: tests/browser
         run: python3 ../../scripts/ci/run.py chromium-install npx playwright install --with-deps chromium
+      - name: Install product screenshot Chromium
+        working-directory: scripts/media
+        run: python3 ../../scripts/ci/run.py media-chromium-install npx playwright install --with-deps chromium
       - name: Test Dashboard with a real browser and isolated server
         run: python3 scripts/ci/run.py dashboard-browser npm test --prefix tests/browser
       - name: Set up Python for example core tests
@@ -255,12 +258,13 @@ jobs:
           AUTONOMOUS_COMPANY_TEST_CENTER_MEDIA=1 AUTONOMOUS_COMPANY_TEST_MEDIA_MODULES="$PWD/scripts/media/node_modules" python3 scripts/ci/run.py center-media python3 -m unittest tests.test_center_runtime.MediaIntegrationTests -v
       - name: Save failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dashboard-browser-failure
           path: |-
             ci-results/
             tests/browser/ci-results/
+            scripts/media/ci-results/
             tests/browser/test-results/
             tests/browser/playwright-report/
           retention-days: 14
@@ -274,7 +278,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           package-manager-cache: false
@@ -282,7 +286,7 @@ jobs:
         run: python3 scripts/ci/run.py tabledelta npm test --prefix examples/tabledelta
       - name: Save failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tabledelta-failure
           path: ci-results/
@@ -297,7 +301,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           package-manager-cache: false
@@ -305,7 +309,7 @@ jobs:
         run: python3 scripts/ci/run.py cuecheck npm test --prefix examples/cuecheck
       - name: Save failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cuecheck-failure
           path: ci-results/
@@ -320,7 +324,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           package-manager-cache: false
@@ -330,7 +334,7 @@ jobs:
         run: python3 scripts/ci/run.py snapog npm run typecheck --prefix projects/snapog
       - name: Save failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: snapog-failure
           path: ci-results/
