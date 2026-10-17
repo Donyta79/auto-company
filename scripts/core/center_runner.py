@@ -9,6 +9,11 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 import argparse
+import base64
+import codecs
+import secrets
+import shutil
+import stat
 import ctypes
 from functools import lru_cache
 import hashlib
@@ -26,8 +31,11 @@ PROTOCOL = 2
 MARKER = ".autonomous-company-center.json"
 MAX_JSON = 128 * 1024
 HEARTBEAT_TIMEOUT = 15
+REVIEW_FILE = ".autonomous-company/recovery-review.json"
 CONTROL_FILES = ("scripts/core/auto-loop.sh", "scripts/core/center_runner.py", "scripts/core/stop-loop.sh",
                  "scripts/core/engine-adapters.sh", "scripts/core/engine-metadata.py", "scripts/core/log_redaction.py",
+                 "scripts/core/usage.py", "scripts/core/usage_lib.py", "i18n/messages.json",
+                 "scripts/core/cycle_reports.py", "scripts/core/live_log.py",
                  "scripts/core/project_isolation.py", "scripts/core/isolation_workspace.py",
                  "scripts/core/isolation_proxy.py", "scripts/core/isolation_entry.py",
                  "scripts/core/isolation_media.py", "scripts/core/isolation-runtime-files.json", "scripts/core/runtime_events.py",
@@ -433,7 +441,11 @@ def preflight(root, center_id=None, allow_protected=False, require_context=True,
         if reason := governance_reason(root):
             result["reason"] = reason
             return result
-    if not lock_free(root / ".auto-loop.pid"):
+    return _quiescence_preflight(root, center_id, result)
+
+
+def _quiescence_preflight(root, center_id, result):
+    if not existing_lock_free(root / ".auto-loop.pid"):
         result["reason"] = "external_loop_active"
         return result
     # Enabled legacy service bindings must be explicitly retired by the operator.
@@ -570,7 +582,7 @@ def run_owned(manifest_path, descriptor, gate):
             raise ValueError("previous_owner_requires_recovery")
     runner = identity(os.getpid())
     receipt = {key: manifest[key] for key in ("centerId", "runtimeId", "entryId", "sourceId", "requestId", "dispatchId", "nonce")}
-    receipt.update(runner=runner, root=str(root), state="accepted", acceptedAt=now(), cleanupConfirmed=False)
+    receipt.update(runner=runner, root=str(root), manifest=str(Path(manifest_path).resolve()), state="accepted", acceptedAt=now(), cleanupConfirmed=False)
     atomic_json(folder / "owner.json", receipt)
     atomic_json(receipt_path, receipt)
     launched, child, child_identity, stopping, owned = False, None, None, None, {}
@@ -927,9 +939,475 @@ def bind_owned(manifest_path):
             os.close(root_lock)
 
 
+def recovery_provenance(root, center_id, expected_framework_revision, genesis_target=None, framework=None):
+    """Historical code is data here; it never grants permission to execute it."""
+    root = Path(root)
+    if not root.is_absolute():
+        raise ValueError("unsafe_recovery_path")
+    for ancestor in (root, *root.parents):
+        if ancestor.is_symlink():
+            raise ValueError("unsafe_recovery_path")
+    root = root.resolve()
+    token(center_id)
+    revision = expected_framework_revision
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("recovery_revision_invalid")
+    marker = marker_for(root)
+    for name in ("centerId", "runtimeId", "entryId", "sourceId", "operationId"):
+        token(marker[name])
+    if marker["centerId"] != center_id or marker.get("protocolVersion") != PROTOCOL:
+        raise ValueError("recovery_identity_mismatch")
+    if root.name != marker["runtimeId"] or root.parent.name != "runtimes":
+        raise ValueError("recovery_root_mismatch")
+    data = root.parent.parent
+    attempt = marker.get("preparationAttempt")
+    genesis_path = "staging/" + marker["operationId"]
+    if attempt is not None:
+        if not isinstance(attempt, str) or not re.fullmatch(r"attempt_[0-9a-f]{32}", attempt):
+            raise ValueError("recovery_attempt_invalid")
+        genesis_path += "/attempts/" + attempt
+    genesis = read_json(control_path(data, genesis_path + "/intent.json"))
+    reserved = genesis.get("reserved", {})
+    if (genesis.get("centerId") != center_id or genesis.get("operationId") != marker["operationId"]
+            or genesis.get("frameworkRevision") != revision or genesis.get("preparationAttempt") != attempt
+            or any(reserved.get(key) != marker[key] for key in ("runtimeId", "entryId", "sourceId"))):
+        raise ValueError("recovery_genesis_mismatch")
+    target = genesis.get("target")
+    if isinstance(target, str) and re.match(r"^[A-Za-z]:[\\/]", target):
+        # The selected WSL domain resolves its own Windows path. Never assume
+        # automount locations or accept a caller-supplied mapping without proof.
+        mapped = subprocess.run(["wslpath", "-a", "-u", target], stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+        if not genesis_target or mapped != genesis_target:
+            raise ValueError("recovery_genesis_target_mismatch")
+        target = mapped
+    if genesis_target is not None and Path(genesis_target).resolve() != root:
+        raise ValueError("recovery_genesis_target_mismatch")
+    if not isinstance(target, str) or not Path(target).is_absolute() or Path(target).resolve() != root:
+        raise ValueError("recovery_genesis_target_mismatch")
+    framework = Path(framework) if framework is not None else Path(__file__).resolve().parents[2]
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    def git(directory, *arguments):
+        checked = subprocess.run(["git", "--no-replace-objects", "-c", "core.fsmonitor=false", "-C", str(directory), *arguments],
+                                 stdin=subprocess.DEVNULL, capture_output=True, env=environment, timeout=10)
+        if checked.returncode:
+            raise ValueError("recovery_revision_unavailable")
+        return checked.stdout
+    if git(framework, "rev-parse", "--verify", revision + "^{commit}").strip().decode("ascii") != revision:
+        raise ValueError("recovery_revision_unavailable")
+    git(framework, "merge-base", "--is-ancestor", revision, "HEAD")
+    if not control_path(root, ".git").is_dir() or git(root, "rev-parse", "--verify", "HEAD").strip().decode("ascii") != revision:
+        raise ValueError("recovery_head_mismatch")
+    import ast
+    historical_runner = git(framework, "show", revision + ":scripts/core/center_runner.py").decode("utf-8")
+    contract = next((ast.literal_eval(node.value) for node in ast.parse(historical_runner).body
+                     if isinstance(node, ast.Assign) and any(isinstance(item, ast.Name) and item.id == "CONTROL_FILES" for item in node.targets)), None)
+    if not isinstance(contract, tuple) or not contract or any(not isinstance(name, str) for name in contract):
+        raise ValueError("recovery_contract_unavailable")
+    for name in contract:
+        source = control_path(root, name)
+        metadata = source.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size > 2 * 1024 * 1024:
+            raise ValueError("recovery_control_changed")
+        reference = git(framework, "show", revision + ":" + name)
+        if source.read_bytes() != reference:
+            raise ValueError("recovery_control_changed")
+    return {"recoveryCompatible": True, "marker": marker, "frameworkRevision": revision}
+
+
+def control_path(root, relative):
+    from product_identity import safe_path
+    return safe_path(Path(root).resolve(), relative)
+
+
+def state_pairs(root, relative):
+    path = control_path(root, relative)
+    if not path.exists():
+        return {}
+    if path.stat().st_size > 16384:
+        raise ValueError("state_file_oversized")
+    return dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines() if "=" in line)
+
+
+def dependency_checks(root=None, engine=None, model=None, require_isolation=True, effort=None, product_language=None):
+    """Probe operator-installed dependencies without running a provider/model."""
+    checks = []
+    settings = {}
+    if root:
+        from localization import read_settings
+        _, settings = read_settings(Path(root))
+    environment = {**os.environ, **settings}
+    if engine is not None:
+        environment["ENGINE"] = engine
+    if model is not None:
+        environment["MODEL"] = model
+    if effort is not None:
+        environment["CODEX_REASONING_EFFORT"] = effort
+    if product_language is not None:
+        environment["AUTONOMOUS_COMPANY_LANGUAGE"] = product_language
+    def record(name, required, function):
+        try:
+            value = function()
+            checks.append({"name": name, "required": required, "ok": True, **value})
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            checks.append({"name": name, "required": required, "ok": False, "reason": str(exc)})
+    def binary(name):
+        selected = shutil.which(name)
+        if not selected:
+            raise ValueError(name + " is required in the execution domain")
+        version = subprocess.run([selected, "--version"], capture_output=True, text=True, timeout=5, check=True)
+        return {"path": selected, "version": version.stdout.splitlines()[0] if version.stdout else "unknown"}
+    if engine is not None:
+        def configuration():
+            if engine not in {"codex", "claude", "cursor", "openai-compatible"}:
+                raise ValueError("unsupported_engine")
+            if model is not None and (not isinstance(model, str) or len(model) > 200 or any(ord(char) < 32 for char in model)):
+                raise ValueError("invalid_model")
+            if product_language is not None and product_language not in {"en", "zh-CN"}:
+                raise ValueError("invalid_product_language")
+            if engine == "codex" and effort is not None and effort not in {"", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
+                raise ValueError("invalid_reasoning_effort")
+            return {"engine": engine, "model": model, "effort": effort, "productLanguage": product_language}
+        record("configuration", True, configuration)
+    record("python", True, lambda: {"path": sys.executable, "version": sys.version.split()[0]})
+    record("git", True, lambda: binary("git"))
+    record("bash", True, lambda: binary("bash"))
+    if require_isolation:
+        def isolation():
+            from project_isolation import runtime_binary
+            selected = runtime_binary()
+            version = subprocess.run([selected, "--version"], capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+            matched = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", version)
+            if not matched or tuple(int(value or 0) for value in matched.groups()) < (0, 9, 0):
+                raise ValueError("bubblewrap >= 0.9 is required; observed " + (version or "unknown version"))
+            return {"path": selected, "version": version}
+        record("bubblewrap", True, isolation)
+        def seccomp():
+            ctypes.CDLL("libseccomp.so.2", use_errno=True)
+            return {"version": "libseccomp.so.2"}
+        record("seccomp", True, seccomp)
+        if engine:
+            def provider():
+                adapter = Path(__file__).with_name("engine-adapters.sh")
+                validated = subprocess.run(["bash", "-c", 'source "$1"; engine_adapter_validate_options',
+                    "center-provider", str(adapter)], env=environment,
+                    capture_output=True, text=True, timeout=10)
+                if validated.returncode:
+                    raise ValueError(validated.stderr.strip() or validated.stdout.strip() or "Provider configuration is invalid")
+                if engine == "openai-compatible":
+                    return {"version": "Python adapter", "model": model}
+                # Use the same fixed resolver as auto-loop (including a Linux
+                # nvm install); a Windows npm launcher is not a Linux provider.
+                adapter = Path(__file__).with_name("engine-adapters.sh")
+                resolved = subprocess.run(["bash", "-c", 'source "$1"; engine_adapter_resolve',
+                    "center-dependency", str(adapter)], env=environment,
+                    capture_output=True, text=True, timeout=10)
+                selected = resolved.stdout.strip()
+                if resolved.returncode or not selected or "\n" in selected:
+                    raise ValueError(engine + " CLI is missing in the execution domain")
+                from project_isolation import native_engine
+                native = native_engine(selected)
+                return {"path": str(native), "model": model, "version": "native Linux executable"}
+            record("provider", True, provider)
+    failed = next((item for item in checks if item["required"] and not item["ok"]), None)
+    return {"ok": not failed, "reason": "dependency_missing" if failed else None,
+            "diagnostic": failed["reason"] if failed else None, "checks": checks}
+
+
+def effective_settings(root, marker=None, observation=None):
+    from localization import read_settings
+    _, settings = read_settings(root)
+    allowed = {"ENGINE", "MODEL", "CODEX_MODEL", "CODEX_EFFORT", "CODEX_REASONING_EFFORT", "LANGUAGE", "AUTONOMOUS_COMPANY_LANGUAGE",
+               "ACTIVE_PROJECT", "CLAUDE_MODEL", "CURSOR_MODEL", "OPENAI_COMPATIBLE_MODEL"}
+    value = {key: data for key, data in settings.items() if key in allowed}
+    owner = (observation or {}).get("owner") or {}
+    if marker and owner and owner.get("manifest") and all(owner.get(key) == marker.get(key) for key in ("centerId", "runtimeId", "entryId", "sourceId")):
+        manifest = read_json(owner["manifest"])
+        if (Path(manifest["root"]).resolve() == Path(root).resolve()
+                and all(manifest.get(key) == marker.get(key) for key in ("centerId", "runtimeId", "entryId", "sourceId"))
+                and all(manifest.get(key) == owner.get(key) for key in ("requestId", "dispatchId", "nonce"))):
+            value.update({key: data for key, data in manifest.get("environment", {}).items() if key in allowed})
+    if "CODEX_REASONING_EFFORT" in value:
+        value["CODEX_EFFORT"] = value["CODEX_REASONING_EFFORT"]
+    return value
+
+
+def readonly_probe(marker):
+    """Observe owner locks without creating directories or control files."""
+    base = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
+    domain = base / "autonomous-company/center-runners" / token(marker["centerId"])
+    folder = domain / "runtimes" / token(marker["runtimeId"]) if marker.get("protocolVersion", 1) >= 2 else domain
+    result = {"slotFree": existing_lock_free(folder / "slot.lock"), "owner": None, "receipt": None, "ownerAlive": False}
+    try:
+        owner = read_json(folder / "owner.json")
+        if any(owner.get(key) != marker.get(key) for key in ("centerId", "runtimeId", "entryId", "sourceId")):
+            raise ValueError("ownership_changed")
+        result.update(owner=owner, ownerAlive=same_process(owner.get("runner")))
+    except FileNotFoundError:
+        pass
+    if marker.get("protocolVersion", 1) >= 2:
+        legacy = read_json(domain / "owner.json") if (domain / "owner.json").exists() else None
+        if not existing_lock_free(domain / "slot.lock") or legacy and (legacy.get("state") != "terminal" or not legacy.get("cleanupConfirmed")):
+            result.update(slotFree=False, legacyConflict=True)
+    return result
+
+
+def source_query(root, query="status", center_id=None, relative_path=None, offset=0, limit=262144, expected_product_id=None):
+    root = Path(root).resolve()
+    marker = marker_for(root) if control_path(root, MARKER).exists() else None
+    if center_id and (not marker or marker["centerId"] != center_id):
+        raise ValueError("ownership_changed")
+    if query in {"status", "capabilities", "recovery"}:
+        observation = readonly_probe(marker) if marker else None
+        pairs = state_pairs(root, ".auto-loop-state")
+        running = not existing_lock_free(control_path(root, ".auto-loop.pid"))
+        pause_reason = state_pairs(root, ".auto-loop-paused").get("PAUSE_REASON")
+        context = execution_context(root, expected_product_id)
+        safe_settings = effective_settings(root, marker, observation)
+        result = {"ok": True, "timestamp": now(), "compatible": compatible(root), "context": context,
+                  "protection": {"reason": protective_reason(root), "pauseReason": pause_reason},
+                  "protectiveReason": protective_reason(root), "pauseReason": pause_reason,
+                  "governanceReason": governance_reason(root), "marker": marker,
+                  "owner": observation.get("owner") if observation else None, "probe": observation,
+                  "owned": bool(marker and (not center_id or marker["centerId"] == center_id)),
+                  "stateFile": pairs, "loopState": pairs, "settings": safe_settings,
+                  "parsed": {"loop": {"state": pairs.get("STATUS", "unknown"),
+                                        "processState": "running" if running else "stopped",
+                                        "pid": None}}}
+        product_lock = control_path(root, ".autonomous-company/product-state.lock")
+        result["productLock"] = {"emptyDirectory": product_lock.is_dir() and not any(product_lock.iterdir()),
+                                 "directoryOwnerKnown": False}
+        pid_path = control_path(root, ".auto-loop.pid")
+        if pid_path.exists() and pid_path.stat().st_size > 4096:
+            raise ValueError("state_file_oversized")
+        result["pid"] = pid_path.read_text().strip() if pid_path.exists() else None
+        result["pidMtimeNs"] = pid_path.stat().st_mtime_ns if pid_path.exists() else None
+        pending = control_path(root, "logs/usage.jsonl.pending")
+        result["usagePendingMtimeNs"] = pending.stat().st_mtime_ns if pending.exists() else None
+        result["parsed"]["loop"]["pid"] = int(result["pid"]) if (result["pid"] or "").isdigit() else None
+        if query == "recovery":
+            result.update(recoverable=pause_reason == "interrupted_cycle",
+                          pendingRecovery=control_path(root, "memories/.consensus-cycle-pending").exists(),
+                          reviewScope="Consensus and human configuration only; review product code and external effects manually")
+        return result
+    if query == "config":
+        observation = readonly_probe(marker) if marker else None
+        if expected_product_id and not execution_context(root, expected_product_id)["valid"]:
+            raise ValueError("product_registration_invalid")
+        return {"ok": True, "marker": marker, "settings": effective_settings(root, marker, observation), "timestamp": now()}
+    if query not in {"log", "file"}:
+        raise ValueError("unsupported_query")
+    if not isinstance(relative_path, str) or "\\" in relative_path:
+        raise ValueError("invalid_read_path")
+    allowed = relative_path in {".auto-loop-state", ".auto-loop.pid", ".auto-loop-paused",
+                                ".autonomous-company/product-state.json", "logs/usage.jsonl", "logs/usage.jsonl.pending"}
+    log_allowed = re.fullmatch(r"logs/(?:auto-loop\.log|cycle-[A-Za-z0-9_-]+\.(?:log|json))", relative_path)
+    if not log_allowed and (query == "log" or not allowed):
+        raise ValueError("invalid_read_path")
+    path = control_path(root, relative_path)
+    if not path.is_file():
+        raise ValueError("source_file_missing")
+    if query == "log" and relative_path != "logs/auto-loop.log":
+        # Require a real durable companion record; caller cannot select an
+        # arbitrary file by presenting a path that merely resembles a cycle.
+        record = path.with_suffix(".json")
+        if not record.is_file() or record.is_symlink():
+            cycle_id = path.stem
+            pairs = state_pairs(root, ".auto-loop-state")
+            context_path = control_path(root, f"logs/{cycle_id}.context.json")
+            pending_path = control_path(root, "logs/usage.jsonl.pending")
+            active = (pairs.get("STATUS") == "running" and pairs.get("PRODUCT_CYCLE_ID") == cycle_id
+                      and not existing_lock_free(control_path(root, ".auto-loop.pid")))
+            if not active or not context_path.is_file() or not pending_path.is_file() or \
+                    read_json(context_path).get("cycleId") != cycle_id or read_json(pending_path).get("cycle_id") != cycle_id:
+                raise ValueError("cycle_not_recorded")
+            from product_identity import read_state
+            state = read_state(root)
+            row = state["cycles"].get(cycle_id)
+            owner = state["identities"].get(row["identityId"]) if row else None
+            context = read_json(context_path)
+            if (not row or not owner or row.get("state") != "dispatching" or not row.get("dispatchAt")
+                    or context.get("project") != row.get("project") or row.get("project") != owner.get("project")
+                    or expected_product_id and row.get("identityId") != expected_product_id):
+                raise ValueError("cycle_not_recorded")
+        elif expected_product_id:
+            from product_identity import read_state
+            row = read_state(root)["cycles"].get(path.stem)
+            if not row or expected_product_id not in {row.get("identityId"), *row.get("createdProductIds", [])}:
+                raise ValueError("cycle_not_recorded")
+    file_stat = path.stat()
+    size = file_stat.st_size
+    offset, limit = max(0, int(offset)), max(1, min(int(limit), 262144))
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (file_stat.st_dev, file_stat.st_ino)):
+            raise ValueError("unsafe_read_path")
+        stream.seek(min(offset, size))
+        payload = stream.read(limit)
+        following = min(offset, size) + len(payload)
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        content = decoder.decode(payload, final=following >= size)
+        # Finish a split UTF-8 character so sequential byte pages keep Chinese
+        # logs intact; at most three extra bytes are read past the page limit.
+        while decoder.getstate()[0] and following < size:
+            extra = stream.read(1)
+            if not extra:
+                content += decoder.decode(b"", final=True)
+                break
+            following += len(extra)
+            payload += extra
+            content += decoder.decode(extra, final=following >= size)
+    return {"ok": True, "marker": marker, "relativePath": relative_path, "content": content,
+            "offset": min(offset, size), "nextOffset": following, "totalBytes": size, "size": size,
+            "bytesBase64": base64.b64encode(payload).decode("ascii"), "revision": f"{size}:{file_stat.st_mtime_ns}",
+            "eof": following >= size, "timestamp": now()}
+
+
+def checked_control_manifest(manifest_path):
+    manifest = read_json(manifest_path)
+    root = Path(manifest["root"]).resolve()
+    marker = marker_for(root)
+    if any(manifest.get(key) != marker.get(key) for key in ("centerId", "runtimeId", "entryId", "sourceId")):
+        raise ValueError("ownership_changed")
+    if not compatible(root):
+        raise ValueError("runtime_incompatible")
+    return manifest, root, marker
+
+
+def recovery_fingerprint(root):
+    """Pin the reviewed governance and product bytes; external effects remain human evidence."""
+    value = hashlib.sha256()
+    paths = [control_path(root, name) for name in (MARKER, ".autonomous-company.local", ".auto-loop-paused",
+             "memories/consensus.md", ".autonomous-company/product-state.json", "logs/usage.jsonl", ".auto-loop-budget-paused") ]
+    products = control_path(root, "projects")
+    if products.exists():
+        for folder, directories, files in os.walk(products, followlinks=False):
+            directories[:] = sorted(name for name in directories if name not in {".git", "node_modules", ".venv"})
+            if any((Path(folder) / name).is_symlink() for name in directories):
+                raise ValueError("unsafe_review_path")
+            paths.extend(Path(folder) / name for name in sorted(files))
+    for path in paths:
+        relative = path.relative_to(root).as_posix()
+        control_path(root, relative)
+        if path.is_symlink():
+            raise ValueError("unsafe_review_path")
+        value.update(relative.encode())
+        if path.exists():
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(262144), b""):
+                    value.update(chunk)
+        else:
+            value.update(b"missing")
+    return value.hexdigest()
+
+
+def source_control(manifest_path):
+    manifest, root, marker = checked_control_manifest(manifest_path)
+    action = manifest["action"]
+    if action not in {"review_recovery", "confirm_recovery"}:
+        raise ValueError("unsupported_control")
+    with execution_lock(marker):
+        previous_path = owner_dir(marker) / "owner.json"
+        if previous_path.exists():
+            previous = read_json(previous_path)
+            if (previous.get("state") != "terminal" or not previous.get("cleanupConfirmed")
+                    or any(previous.get(key) != marker.get(key) for key in ("centerId", "runtimeId", "entryId", "sourceId"))
+                    or same_process(previous.get("runner")) or same_process(previous.get("child"))
+                    or any(same_process(item) for item in previous.get("ownedProcesses", []))):
+                raise ValueError("owner_recovery_required")
+        check = preflight(root, allow_protected=True, require_context=False)
+        if not check["quiescent"]:
+            raise ValueError(check["reason"])
+        descriptor = lock_file(control_path(root, ".auto-loop.pid"))
+        try:
+            # No config, interactive team, model, loop, media, or old runtime
+            # writer may remain while recovering or confirming human review.
+            if operator_previews(root):
+                raise ValueError("preview_owner_unconfirmed")
+            if control_path(root, ".auto-loop-stop-pending").exists():
+                raise ValueError("stop_unconfirmed")
+            for name in (".autonomous-company.local.lock", ".autonomous-company.local.team-active",
+                         ".autonomous-company.local.language-update", ".autonomous-company/product-state.lock"):
+                if control_path(root, name).exists():
+                    raise ValueError("configuration_writer_active")
+            if not existing_lock_free(control_path(root, ".autonomous-company/project-registry.lock")):
+                raise ValueError("configuration_writer_active")
+            environment = {**os.environ, "AUTONOMOUS_COMPANY_ROOT": str(root)}
+            budget = subprocess.run([sys.executable, str(root / "scripts/core/usage.py"), "check",
+                "--ledger", str(root / "logs/usage.jsonl"), "--pause-file", str(root / ".auto-loop-budget-paused")],
+                cwd=root, env=environment, capture_output=True, text=True, timeout=15)
+            if budget.returncode or control_path(root, ".auto-loop-budget-paused").exists():
+                raise ValueError("budget_pause")
+            if action == "review_recovery":
+                command = subprocess.run(["bash", str(root / "scripts/core/consensus-guard.sh"), "recover"],
+                    cwd=root, env=environment, capture_output=True, text=True, timeout=15)
+                if command.returncode not in {0, 42} or control_path(root, "memories/.consensus-cycle-pending").exists():
+                    raise ValueError("interrupted_recovery_failed")
+                for arguments in (("usage.py", "recover", "--ledger", str(root / "logs/usage.jsonl"),
+                                   "--pause-file", str(root / ".auto-loop-budget-paused")),
+                                  ("product_identity.py", "--root", str(root), "recover")):
+                    subprocess.run([sys.executable, str(root / "scripts/core" / arguments[0]), *arguments[1:]],
+                        cwd=root, capture_output=True, text=True, timeout=15, check=True)
+                reason = state_pairs(root, ".auto-loop-paused").get("PAUSE_REASON")
+                if reason != "interrupted_cycle":
+                    raise ValueError(reason or "no_interrupted_pause")
+                original = subprocess.run(["bash", str(root / "scripts/core/consensus-guard.sh"), "preflight", "0"],
+                    cwd=root, env=environment, capture_output=True, text=True, timeout=15)
+                if original.returncode:
+                    raise ValueError("unresolved_p1" if original.returncode == 41 else "governance_invalid")
+                if protective_reason(root) == "budget_pause":
+                    raise ValueError("budget_pause")
+                context = execution_context(root, manifest.get("productId"), check_git=True)
+                if not context["valid"]:
+                    raise ValueError(context["reason"])
+                review = {"reviewToken": secrets.token_hex(24), "createdAt": now(), "expiresAt": time.time() + 900,
+                          "fingerprint": recovery_fingerprint(root), "pauseReason": reason,
+                          **{key: marker[key] for key in ("centerId", "runtimeId", "entryId", "sourceId")}}
+                atomic_json(control_path(root, REVIEW_FILE), review)
+                return {"ok": True, "reviewToken": review["reviewToken"], "pauseReason": reason,
+                        "writersStopped": True, "recoveryComplete": True, "context": context,
+                        "requiresConfirmation": ["productCodeReviewed", "externalEffectsReviewed"],
+                        "reviewScope": "Restored consensus and human configuration; product code and external effects are not rolled back"}
+            review = read_json(control_path(root, REVIEW_FILE))
+            if manifest.get("reviewToken") != review["reviewToken"] or time.time() > review["expiresAt"] or \
+                    any(review.get(key) != marker.get(key) for key in ("centerId", "runtimeId", "entryId", "sourceId")):
+                raise ValueError("recovery_review_expired")
+            if not all(manifest.get(key) is True for key in ("productCodeReviewed", "externalEffectsReviewed")):
+                raise ValueError("human_review_required")
+            if review["fingerprint"] != recovery_fingerprint(root):
+                raise ValueError("recovery_review_changed")
+            if state_pairs(root, ".auto-loop-paused").get("PAUSE_REASON") != "interrupted_cycle":
+                raise ValueError("governance_pause_changed")
+            if governance_reason(root) or control_path(root, "memories/.consensus-cycle-pending").exists():
+                raise ValueError(governance_reason(root) or "interrupted_recovery_pending")
+            if control_path(root, ".auto-loop-budget-paused").exists() or control_path(root, ".auto-loop-stop-pending").exists():
+                raise ValueError(protective_reason(root))
+            context = execution_context(root, manifest.get("productId"), check_git=True)
+            if not context["valid"]:
+                raise ValueError(context["reason"])
+            confirmation = {**review, "confirmedAt": now(), "productCodeReviewed": True, "externalEffectsReviewed": True}
+            atomic_json(control_path(root, REVIEW_FILE), confirmation)
+            control_path(root, ".auto-loop-paused").unlink()
+            return {"ok": True, "confirmedAt": confirmation["confirmedAt"], "resumed": False}
+        finally:
+            os.close(descriptor)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("run", "probe", "admit", "preflight", "media", "media-status", "bind"))
+    parser.add_argument("action", choices=("run", "probe", "admit", "preflight", "media", "media-status", "bind", "dependencies", "query", "control", "stream-log", "stream-log-complete"))
+    parser.add_argument("--query", default="status")
+    parser.add_argument("--relative-path", "--path", dest="relative_path")
+    parser.add_argument("--input-path")
+    parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--limit", type=int, default=262144)
+    parser.add_argument("--engine")
+    parser.add_argument("--model")
+    parser.add_argument("--effort")
+    parser.add_argument("--product-language")
+    parser.add_argument("--require-isolation", choices=("0", "1"), default="1")
     parser.add_argument("--manifest")
     parser.add_argument("--root")
     parser.add_argument("--center-id")
@@ -944,7 +1422,21 @@ def main():
         if args.action == "admit":
             admission(args.root)
             return 0
-        if args.action == "preflight":
+        if args.action == "stream-log-complete":
+            from live_log import stream_log_complete
+            stream_log_complete(args.input_path)
+            return 0
+        if args.action == "stream-log":
+            from live_log import stream_log
+            stream_log(args.root, args.input_path, args.relative_path, admission=admission, control_path=control_path)
+            return 0
+        if args.action == "dependencies":
+            result = dependency_checks(args.root, args.engine, args.model, args.require_isolation == "1", args.effort, args.product_language)
+        elif args.action == "query":
+            result = source_query(args.root, args.query, args.center_id, args.relative_path, args.offset, args.limit, args.expected_product_id)
+        elif args.action == "control":
+            result = source_control(args.manifest)
+        elif args.action == "preflight":
             result = preflight(args.root, args.center_id, args.allow_protected == "1", args.require_context == "1", args.expected_product_id)
         elif args.action == "media":
             result = media(args.manifest)

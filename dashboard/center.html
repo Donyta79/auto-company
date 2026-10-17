@@ -142,6 +142,7 @@
           </div>
         </div>
         <footer class="dialog-actions">
+          <div id="workChecks" class="check-results" hidden></div>
           <strong id="workBatchSummary" aria-live="polite"></strong>
           <fieldset class="work-execution"><legend class="visually-hidden" data-i18n="executionChoice">提交方式</legend><div class="work-execution-options"><label class="radio-row"><input type="radio" name="executionMode" value="start_now"><span data-i18n="startNow">开始运行</span></label><label class="radio-row"><input type="radio" name="executionMode" value="enqueue" checked><span data-i18n="workEnqueue">仅加入队列</span></label></div><p id="workExecutionHint"></p></fieldset>
           <div class="work-submit-actions"><button class="button secondary dialog-close" type="button" data-i18n="cancel">取消</button><button class="button primary" type="submit">创建项目</button></div>
@@ -190,6 +191,20 @@
       </div>
     </dialog>
 
+    <dialog id="environmentDialog" aria-labelledby="environmentTitle">
+      <form id="environmentForm" class="dialog-form" method="dialog">
+        <header class="dialog-header"><h2 id="environmentTitle" data-i18n="environmentTitle">运行环境</h2><button class="icon-button dialog-close" type="button" data-i18n-aria="close" aria-label="关闭"><span data-icon="x" aria-hidden="true"></span></button></header>
+        <div class="environment-body">
+          <p id="environmentCurrent"></p>
+          <label><span data-i18n="environmentChoice">执行环境</span><select name="candidate" required></select></label>
+          <label id="environmentUserLabel"><span data-i18n="environmentUser">环境用户名</span><input name="user" autocomplete="off" spellcheck="false"></label>
+          <div id="environmentChecks" class="check-results" aria-live="polite"></div>
+        </div>
+        <p class="form-status" role="status" aria-live="polite"></p>
+        <footer class="dialog-actions"><button class="button secondary" id="environmentCheck" type="button" data-i18n="checkEnvironment">检查环境</button><button class="button primary" type="submit" data-i18n="connectEnvironment">连接</button></footer>
+      </form>
+    </dialog>
+
     <dialog id="settingsDialog" aria-labelledby="settingsTitle">
       <form id="settingsForm" method="dialog" class="dialog-form">
         <header class="dialog-header"><h2 id="settingsTitle" data-i18n="settings">设置</h2><button class="icon-button dialog-close" type="button" aria-label="关闭" data-i18n-aria="close"><span data-icon="x" aria-hidden="true"></span></button></header>
@@ -224,7 +239,7 @@
         <header class="dialog-header"><h2 id="confirmTitle"></h2><button class="icon-button dialog-close" type="button" aria-label="关闭" data-i18n-aria="close"><span data-icon="x" aria-hidden="true"></span></button></header>
         <p id="confirmMessage"></p>
         <p class="form-status" role="status" aria-live="polite"></p>
-        <footer class="dialog-actions"><button class="button secondary dialog-close" type="button" data-i18n="cancel">取消</button><button id="confirmActionButton" class="button primary" type="submit" data-i18n="confirm">确认</button></footer>
+        <footer class="dialog-actions"><button class="button secondary dialog-close" type="button" data-i18n="back">返回</button><button id="confirmActionButton" class="button primary" type="submit" data-i18n="confirm">确认</button></footer>
       </form>
     </dialog>
 

@@ -113,7 +113,7 @@ test("runtime filters use fresh source observations while preserving read-only a
 
 test("round filters match startup reservations without changing their raw status", () => {
   const { state, filteredEntries, sortedEntries } = helpers();
-  state.entries = ["not_started", "startup_unconfirmed", "unknown", "pending"].map(value => ({ entryId: value, kind: "product", latestCycleStatus: value, lastActivityAt: "2026-10-03T00:00:00Z" }));
+  state.entries = ["not_started", "startup_unconfirmed", "unknown", "pending"].map(value => ({ entryId: value, kind: "product", cycleNumber: 1, latestCycleStatus: value, lastActivityAt: "2026-10-03T00:00:00Z" }));
   for (const value of ["not_started", "startup_unconfirmed", "unknown", "pending"]) { state.roundFilter = value; assert.deepEqual(Array.from(filteredEntries(), entry => entry.entryId), [value]); }
   state.roundFilter = "all";
   assert.deepEqual(Array.from(sortedEntries(), entry => entry.entryId), ["not_started", "startup_unconfirmed", "unknown", "pending"], "Equal activity timestamps retain API order");
@@ -132,7 +132,7 @@ test("parallel projects use their own live request and include active exploratio
   state.entries = requests.map((request, index) => ({ entryId: request.entryId, kind: index ? "exploration" : "product", executionSummary: request }));
   state.entries.push({ entryId: "historical-exploration", kind: "exploration" });
   assert.equal(entryState(state.entries[1]), "running");
-  assert.equal(filteredEntries().length, 2);
+  assert.equal(filteredEntries().length, 3);
   assert.equal(normalizeCounts().running, 2);
   const elements = {};
   context.document.getElementById = id => elements[id] ||= { replaceChildren() { this.textContent = ""; }, append(node) { this.textContent += node.textContent; } };
@@ -249,9 +249,9 @@ test("catalog filters use recorded state and never search report bodies", () => 
   ];
   state.filter = "all"; state.query = "needle";
   assert.equal(filteredEntries().length, 0);
-  state.query = ""; assert.deepEqual(Array.from(filteredEntries(), (entry) => entry.entryId), ["a", "b"]);
+  state.query = ""; assert.deepEqual(Array.from(filteredEntries(), (entry) => entry.entryId), ["a", "b", "d"]);
   state.filter = "queued"; assert.deepEqual(Array.from(filteredEntries(), (entry) => entry.entryId), ["b"]);
-  state.filter = "attention"; assert.deepEqual(Array.from(filteredEntries(), (entry) => entry.entryId), []);
+  state.filter = "attention"; assert.deepEqual(Array.from(filteredEntries(), (entry) => entry.entryId), ["d"]);
   state.filter = "archived"; assert.deepEqual(Array.from(filteredEntries(), (entry) => entry.entryId), ["c"]);
   state.filter = "exploration"; assert.deepEqual(Array.from(filteredEntries(), (entry) => entry.entryId), ["d"]);
   state.filter = "reference"; assert.deepEqual(Array.from(filteredEntries(), (entry) => entry.entryId), ["e"]);
@@ -536,6 +536,7 @@ function importHarness() {
   const close = node(); close.closest = () => dialog;
   context.document.querySelectorAll = selector => selector === '.dialog-close' ? [close] : selector === 'dialog' ? [dialog] : [];
   context.document.querySelector = selector => selector === 'dialog[open]' && dialog.open ? dialog : null;
+  get('environmentForm').elements = { candidate: node(), user: node() };
   const form = get('importForm'); const status = node();
   form.querySelector = selector => selector === '[type="submit"]' ? get('probeButton') : selector === '.form-status' ? status : null;
   const mode = [node(), node()]; mode.value = 'readonly';
@@ -621,6 +622,7 @@ function harness() {
   }
   const nodes = {};
   const document = { getElementById: id => nodes[id] ||= Object.assign(new Node(), { id }), createElement: () => new Node(), querySelectorAll: () => [], querySelector: () => null, addEventListener() {} };
+  document.getElementById('environmentForm').elements = { candidate: new Node(), user: new Node() };
   document.getElementById('importForm').elements = { mode: [], root: new Node() };
   const context = vm.createContext({ window: {}, document, performance: { now: () => 0 }, location: { origin: "http://127.0.0.1:8810" }, URL, Intl, Date, Number, Object, Set, Map, String, Math, AbortController,
     setTimeout: () => 1, clearTimeout() {}, crypto: { randomUUID: () => 'intent-one' } });
@@ -1038,6 +1040,11 @@ for (const superseded of [false, true]) {
 
 function workFormHarness(kind) {
   const h = harness();
+  let transport;
+  Object.defineProperty(h.context, 'fetch', { configurable: true, get: () => (url, options) => url.endsWith('/preflight')
+    ? Promise.resolve(envelope({ ready: true, checks: [], environmentRevision: 0 })) : transport(url, options), set: value => { transport = value; } });
+  h.context.window.DashboardIcons = { hydrate() {} };
+
   const form = h.nodes[kind === 'continue' ? 'continueForm' : 'newWorkForm'];
   const dialog = h.context.document.getElementById(kind === 'continue' ? 'continueDialog' : 'newWorkDialog');
   const button = { disabled: false, dataset: {}, textContent: '' }; const status = { textContent: '', classList: { toggle() {} } };
@@ -1069,7 +1076,7 @@ for (const kind of ['continue', 'new']) {
           if (url.includes('/summary')) refreshes += 1;
           return refreshResponse(url);
         };
-        const pending = h.form.fire('submit'); h.dialog.close();
+        const pending = h.form.fire('submit'); for (let i = 0; i < 20; ++i) await Promise.resolve(); h.dialog.close();
         if (change !== 'close') h.open('entry-b');
         let newer;
         if (change === 'new-submit') newer = h.form.fire('submit');
@@ -1091,7 +1098,7 @@ for (const kind of ['continue', 'new']) {
   test(`${kind} work submits once and current success opens the queue`, async () => {
     const h = workFormHarness(kind); h.open(); const pending = deferred(); let writes = 0;
     h.context.fetch = async (url, options) => options.method === 'POST' ? (++writes, pending.promise) : refreshResponse(url);
-    const first = h.form.fire('submit'); await h.form.fire('submit');
+    const first = h.form.fire('submit'); for (let i = 0; i < 20; ++i) await Promise.resolve(); await h.form.fire('submit');
     assert.equal(writes, 1); assert.equal(h.button.disabled, true);
     pending.resolve(envelope({ operationId: 'operation-a' })); await first;
     assert.equal(h.dialog.open, false); assert.equal(h.queueOpens(), 1);
@@ -1118,7 +1125,7 @@ for (const kind of ['continue', 'new']) {
         if (url.includes('/summary')) refreshes += 1;
         return refreshResponse(url);
       };
-      const first = h.form.fire('submit'); h.form.elements.model.value = 'new-edit';
+      const first = h.form.fire('submit'); for (let i = 0; i < 20; ++i) await Promise.resolve(); h.form.elements.model.value = 'new-edit';
       if (failure) pending.reject(new Error('old fields rejected')); else pending.resolve(envelope({ operationId: 'operation-a' }));
       await first;
       assert.equal((kind === 'new' ? bodies[0].groups[0] : bodies[0]).config.model, 'submitted-model');
@@ -1132,7 +1139,7 @@ for (const kind of ['continue', 'new']) {
     const h = workFormHarness(kind); h.open(); const refresh = deferred();
     h.context.fetch = async (url, options) => options.method === 'POST' ? envelope({}) : url.includes('/summary') ? refresh.promise : refreshResponse(url);
     const first = h.form.fire('submit');
-    for (let i = 0; i < 10 && h.dialog.open; ++i) await Promise.resolve();
+    for (let i = 0; i < 30 && h.dialog.open; ++i) await Promise.resolve();
     assert.equal(h.dialog.open, false, 'the completed submitted form closed before catalog refresh');
     h.open('entry-b'); refresh.resolve(envelope({ language: 'en' })); await first;
     assert.equal(h.dialog.open, true); assert.equal(h.button.disabled, false); assert.equal(h.queueOpens(), 0);

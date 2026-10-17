@@ -387,7 +387,7 @@ for (const change of ['new request', 'selection']) {
 }
 
 function logSourceHarness(center = true) {
-  const fields = new Map(['logText', 'copyLogButton', 'refreshLogButton', 'logStatus', 'newLogButton', 'followLog'].map((id) => [id, {}]));
+  const fields = new Map(['logText', 'rawLogText', 'copyLogButton', 'refreshLogButton', 'logStatus', 'newLogButton', 'followLog'].map((id) => [id, {}]));
   const reads = [];
   const context = vm.createContext({ window: {}, location: { pathname: center ? '/products/entry-a' : '/journal' },
     document: { getElementById(id) { assert.ok(fields.has(id), id); return fields.get(id); } },
@@ -436,6 +436,7 @@ for (const change of ['source', 'revision', 'resource']) {
     h.state.data = h.snapshot(change === 'source' ? 'source-b' : 'source-a', change === 'revision' ? 2 : 1, change === 'resource' ? 'log-new-resource' : 'log-same-cycle');
     const pending = h.loadLog();
     assert.equal(h.fields.get('logText').textContent, '');
+    assert.equal(h.fields.get('rawLogText').textContent, '');
     h.reads[1].reject(new Error('new context unavailable'));
     await pending;
     assert.equal(h.state.logText, '');
@@ -516,4 +517,14 @@ test('structured logs read as cycle text, commands and failures without transpor
   assert.match(text, /connection lost/);
   assert.doesNotMatch(text, /thread_id|aggregated_output|stdin/);
   assert.equal(readableLog('Cycle #1\nnormal text'), 'Cycle #1\nnormal text');
+});
+
+
+test('file changes and collaboration remain readable while raw events retain their detail', () => {
+  const { readableLog } = helpers();
+  const value = readableLog(JSON.stringify({ type: 'item.completed', item: { type: 'file_change', changes: [{ path: 'src/report.js', kind: 'update' }] } }) + '\n' +
+    JSON.stringify({ type: 'item.completed', item: { type: 'collab_agent_tool_call', tool: 'spawn_agent', status: 'completed' } }));
+  assert.match(value, /src\/report.js/);
+  assert.match(value, /spawn_agent/);
+  assert.doesNotMatch(value, /item.completed/);
 });

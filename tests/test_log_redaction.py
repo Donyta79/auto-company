@@ -15,6 +15,15 @@ from runtime_events import Recorder, bounded_text
 
 
 class LogRedactionTests(unittest.TestCase):
+    def test_intersecting_secrets_cover_original_union_and_preserve_usage(self):
+        credentials = {"OPENAI_API_KEY": "alpha-middle", "CUSTOM_SECRET": "middle-omega",
+                       "SECOND_TOKEN": "1234"}
+        with patch.dict(os.environ, credentials, clear=True):
+            self.assertEqual(redact_text("alpha-middle-omega"), "[REDACTED]")
+            result = json.loads(redact_output(json.dumps({"result": "alpha-middle-omega",
+                                                        "usage": {"input_tokens": 1234}})))
+        self.assertEqual(result, {"result": "[REDACTED]", "usage": {"input_tokens": 1234}})
+
     def test_supported_and_custom_environment_credentials_share_policy(self):
         credentials = {name: f"fictional-{name}-canary" for name in PROVIDER_KEYS}
         credentials.update(GH_TOKEN="fictional-gh-canary", DEPLOY_SECRET="fictional-deploy-canary",

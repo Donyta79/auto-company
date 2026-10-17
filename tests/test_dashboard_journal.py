@@ -192,7 +192,7 @@ class JournalTests(JournalFixture):
 
     def test_log_requires_ledger_identity_and_bounds_tail(self):
         self.ledger(record())
-        self.write("logs/cycle-0001-run-a.log", "old-" + "a" * data_module.MAX_LOG_BYTES + "-latest")
+        self.write("logs/cycle-0001-run-a.log", "old-" + "a" * data_module.MAX_LOG_BYTES + "\n-latest")
         result = self.source.log("cycle-0001-run-a")
         self.assertTrue(result["available"])
         self.assertTrue(result["truncated"])
@@ -201,6 +201,66 @@ class JournalTests(JournalFixture):
         for identity in ("../secret", "cycle-0001-unknown", "cycle-0001-run-a/../../secret"):
             with self.assertRaises(ValueError):
                 self.source.log(identity)
+
+    def test_execution_domain_configuration_requires_matching_scoped_identity(self):
+        from product_identity import reserve_cycle
+        self.write('projects/probe/index.html', '<p>Fixture</p>')
+        self.write('.autonomous-company.local', 'ACTIVE_PROJECT=projects/probe\n')
+        cycle = reserve_cycle(self.root, 'projects/probe', 'live-fixture', 1)
+        self.write('.auto-loop-state', 'STATUS=idle\nPRODUCT_ID=' + cycle['productId'] + '\nENGINE=codex\nMODEL=actual-model\n')
+        status = {'ok': True, 'stateFile': self.source.pairs('.auto-loop-state'),
+                  'parsed': {'loop': {'state': 'idle', 'processState': 'running', 'pid': 4321}}}
+        source = data_module.JournalSource(self.root, 'en', scope=data_module.ProductScope('product', product_id=cycle['productId'], project='projects/probe'))
+        config = {'effort': 'high', 'productLanguage': 'zh-CN'}
+        result = source.snapshot(status=status, runtime_config=config)
+        self.assertEqual(result['runtime']['reasoning'], 'high')
+        self.assertEqual(result['runtime']['language'], 'zh-CN')
+        self.assertEqual(result['runtime']['configSource'], 'execution_domain')
+        self.assertEqual(result['runtime']['state'], 'idle')
+        changed = {**status, 'stateFile': {**status['stateFile'], 'PRODUCT_ID': 'f' * 32}}
+        result = source.snapshot(status=changed, runtime_config=config)
+        self.assertEqual(result['runtime']['reasoning'], 'unknown')
+        self.assertEqual(result['runtime']['state'], 'unknown')
+        self.assertNotIn('configSource', result['runtime'])
+
+
+    def test_usage_pending_does_not_promote_reserved_attempt_before_real_dispatch(self):
+        from product_identity import reserve_cycle, update_cycle
+        status = self.live_status()
+        self.write("projects/probe/index.html", "<p>Real file</p>")
+        reservation = reserve_cycle(self.root, "projects/probe", "staged-attempt", 2)
+        identity = reservation["cycleId"]
+        pending = record(identity, number=2)
+        self.write("logs/usage.jsonl.pending", json.dumps(pending))
+        self.write(f"logs/{identity}.context.json", json.dumps({
+            "version": 1, "cycleId": identity, "project": "projects/probe",
+            "recordedAt": pending["started_at"], "source": "runtime_context"}))
+        identity_path = self.root / ".autonomous-company/product-state.json"
+        reserved_bytes = identity_path.read_bytes()
+        reserved = self.source.snapshot(status=status)
+        self.assertEqual(reserved["cycles"][0]["status"], "not_started")
+        self.assertFalse(reserved["cycles"][0]["active"])
+        self.assertIsNone(reserved["cycles"][0]["startedAt"])
+        self.assertIsNone(reserved["runtime"]["currentCycleId"])
+        self.assertIsNone(reserved["cycles"][0]["usage"]["totalTokens"])
+        self.assertEqual(identity_path.read_bytes(), reserved_bytes)
+        with self.assertRaises(ValueError):
+            self.source.log(identity, status)
+        update_cycle(self.root, identity, "dispatching")
+        dispatched_bytes = identity_path.read_bytes()
+        dispatched = self.source.snapshot(status=status)
+        self.assertTrue(dispatched["cycles"][0]["active"])
+        self.assertEqual(dispatched["cycles"][0]["status"], "running")
+        actual_dispatch = self.source.identity_state()["cycles"][identity]["dispatchAt"]
+        self.assertEqual(dispatched["cycles"][0]["startedAt"], actual_dispatch)
+        self.assertNotEqual(dispatched["cycles"][0]["startedAt"], pending["started_at"])
+        self.assertEqual(identity_path.read_bytes(), dispatched_bytes)
+        update_cycle(self.root, identity, "completed")
+        completed = self.source.snapshot(status=status)
+        self.assertFalse(completed["cycles"][0]["active"])
+        self.assertEqual(completed["cycles"][0]["status"], "completed")
+        self.assertIsNone(completed["runtime"]["currentCycleId"])
+
 
     def test_documents_only_advertise_delivery_and_one_explicit_project_readme(self):
         self.write("DELIVERY.md", "# Sample — Local MVP\n[Guide](projects/sample/README.md)\n")

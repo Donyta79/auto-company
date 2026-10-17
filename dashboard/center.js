@@ -12,6 +12,7 @@ window.DashboardNavigation.register('center', (view) => {
     language: "zh-CN", revision: null, apiRevision: null, apiCenterId: null, centerId: null, observedAt: null,
     summary: null, entries: [], requests: [], operations: [], preferences: null, preferencesRevision: null, preferencesToken: 0,
     query: "", filter: "all", loading: true, stale: false, refreshing: null,
+    writeGeneration: 0, refreshGeneration: 0, environmentToken: 0, environment: null,
     refreshToken: 0, dialogToken: 0, timer: null, menuEntryId: null, historyVisible: false,
     activeEntry: null, managementEntry: null, selectedSourceId: null, sourceToken: 0, sourceRefreshToken: 0, sourceStatusToken: 0, probe: null, probeToken: 0, confirmAction: null, drawerOpen: false, pendingWrites: new Map(), projectionSignature: "", projectionTimer: null,
     activeWorkGroupId: null, nextWorkGroupId: 0, workSubmitting: false,
@@ -54,7 +55,7 @@ window.DashboardNavigation.register('center', (view) => {
       if (CATALOG_FILTERS.includes(saved.filter)) state.filter = saved.filter;
       if (["activity", "name", "work", "status", "round"].includes(saved.sort)) state.sort = saved.sort;
       if (["asc", "desc"].includes(saved.sortDirection)) state.sortDirection = saved.sortDirection;
-      if (["all", "completed", "running", "failed", "pending", "interrupted", "completed_with_timeout", "paused", "unknown", "not_started", "startup_unconfirmed"].includes(saved.roundFilter)) state.roundFilter = saved.roundFilter;
+      if (["all", "completed", "running", "failed", "pending", "interrupted", "completed_with_timeout", "paused", "unknown", "not_started", "startup_unconfirmed", "no_rounds"].includes(saved.roundFilter)) state.roundFilter = saved.roundFilter;
       if (Number.isFinite(saved.scroll) && saved.scroll >= 0) state.restoreScroll = saved.scroll;
       $("productSearch").value = state.query;
     } catch (_) {}
@@ -92,7 +93,7 @@ window.DashboardNavigation.register('center', (view) => {
       const index = state.focusOrder.indexOf(key);
       const restored = state.focusOrder.slice(index + 1).concat(state.focusOrder.slice(0, Math.max(0, index)).reverse()).map(value => [...document.querySelectorAll("[data-focus-key]")].find(item => item.dataset.focusKey === value)).some(focusControl);
       if (!restored) focusControl($("productSearch"));
-      announce(message("focusedItemRemoved"));
+      announce(message(restored ? "focusedItemMoved" : "focusedItemSearch", { count: filteredEntries().length }));
     }
   }
   function idempotencyKey() { return globalThis.crypto?.randomUUID?.() || `center-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
@@ -140,7 +141,7 @@ window.DashboardNavigation.register('center', (view) => {
     const value = { ...body, idempotencyKey: key };
     try {
       const result = await api(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Idempotency-Key": key }, body: JSON.stringify(value) }, timeout);
-      state.pendingWrites.delete(signature); return result;
+      state.writeGeneration += 1; state.pendingWrites.delete(signature); return result;
     } catch (error) { throw error; }
   }
 
@@ -153,7 +154,7 @@ window.DashboardNavigation.register('center', (view) => {
       REVISION_CONFLICT: "revisionConflict", UNSUPPORTED: "unsupported", INVALID_RESPONSE: "invalidResponse",
       EXECUTION_DOMAIN_UNCONFIGURED: "executionUnavailable", OPEN_REQUEST_EXISTS: "openRequestExists",
       PRODUCT_LANGUAGE_LOCKED: "productLanguageLocked", PRODUCT_REGISTRATION_INVALID: "productRegistrationInvalid", UNRESOLVED_P1: "unresolvedP1",
-      RECOVERY_REQUIRED: "recoveryRequired", INVALID_CONFIG: "invalidConfig", INVALID_PREFERENCE: "invalidConfig", INVALID_TEMPLATE: "templateNameInvalid", TEMPLATE_NOT_FOUND: "selectTemplateFirst",
+      RECOVERY_REQUIRED: "recoveryRequired", INVALID_CONFIG: "invalidConfig", INVALID_PREFERENCE: "invalidConfig", INVALID_TEMPLATE: "templateNameInvalid", TEMPLATE_NOT_FOUND: "selectTemplateFirst", TEMPLATE_NAME_CONFLICT: "templateNameConflict",
       INVALID_BATCH: "workBatchLimit", INVALID_DIRECTION: "fieldInvalid", INVALID_REQUEST: "invalidConfig", INVALID_INPUT: "fieldInvalid",
     };
     const key = map[error?.code] || (error?.messageKey && window.CENTER_MESSAGES.en[error.messageKey] ? error.messageKey : null);
@@ -270,9 +271,7 @@ window.DashboardNavigation.register('center', (view) => {
   }
 
   function inProjectList(entry) {
-    if (entry.kind !== "exploration") return entry.kind !== "reference";
-    const request = state.requests.find((item) => item.requestId === execution(entry).requestId);
-    return Boolean(request && (OPEN_STATES.has(requestState(request)) || requestState(request) === "failed"));
+    return entry.kind !== "reference";
   }
 
   function normalizeCounts() {
@@ -284,6 +283,7 @@ window.DashboardNavigation.register('center', (view) => {
       if (inProjectList(entry) && value === "queued") counts.queued += 1;
       if (inProjectList(entry) && ["blocked", "attention", "failed", "unknown"].includes(value)) counts.attention += 1;
     }
+    counts.attention += state.operations.filter(item => !item.archived && ["failed", "attention"].includes(item.state)).length;
     return counts;
   }
 
@@ -304,7 +304,7 @@ window.DashboardNavigation.register('center', (view) => {
       if (!filterMatch) return false;
       if (state.roundFilter !== "all" && latestRoundState(entry) !== state.roundFilter) return false;
       if (!query) return true;
-      return [entry.displayName, entry.description, entry.alias].some((value) => text(value).toLocaleLowerCase(state.language).includes(query));
+      return [entry.displayName, entry.description, entry.alias, entry.direction, entry.directionSummary, entry.shortId, entry.createdAt, entry.entryId, entry.productId, entry.explorationId].some((value) => text(value).toLocaleLowerCase(state.language).includes(query));
     });
   }
 
@@ -395,7 +395,7 @@ window.DashboardNavigation.register('center', (view) => {
       for (const direction of ["asc", "desc"]) sortGroup.append(new Option(message(field === "round" ? direction === "asc" ? "roundAscending" : "roundDescending" : direction === "asc" ? "statusRunningFirst" : "statusUnknownFirst"), `sort:${direction}`));
       select.append(sortGroup);
       const filterGroup = element("optgroup"); filterGroup.label = message("filterProducts");
-      const values = field === "status" ? ["running", "queued", "attention", "paused", "ended", "idle", "unknown", "failed", "blocked", "canceled", "preparing", "starting", "stopping", "archived"] : ["completed", "running", "failed", "pending", "not_started", "startup_unconfirmed", "interrupted", "completed_with_timeout", "paused", "unknown"];
+      const values = field === "status" ? ["running", "queued", "attention", "paused", "ended", "idle", "unknown", "failed", "blocked", "canceled", "preparing", "starting", "stopping", "archived", "reference", "exploration"] : ["completed", "running", "failed", "pending", "not_started", "startup_unconfirmed", "interrupted", "completed_with_timeout", "paused", "unknown", "no_rounds"];
       for (const value of values) filterGroup.append(new Option(field === "status" ? filterLabel(value) : roundLabel(value), `filter:${value}`));
       select.append(filterGroup);
       const current = field === "status" ? state.filter : state.roundFilter;
@@ -420,6 +420,7 @@ window.DashboardNavigation.register('center', (view) => {
   }
 
   function latestRoundState(entry) {
+    if (!knownNumber(entry.cycleNumber) && ["", "unknown"].includes(text(entry.latestCycleStatus))) return "no_rounds";
     const recorded = text(entry.latestCycleStatus) || "unknown";
     return readonlyObservationState(entry) === "ended" && ["running", "startup_unconfirmed", "pending"].includes(recorded) ? "interrupted" : recorded;
   }
@@ -518,7 +519,7 @@ window.DashboardNavigation.register('center', (view) => {
   function renderEntries() {
     const container = $("productRows");
     const entries = sortedEntries();
-    const signature = JSON.stringify([entries.map(rowSignature), state.query, state.filter, state.sort, state.sortDirection, state.roundFilter, state.otherExpanded, state.loading]);
+    const signature = JSON.stringify([entries.map(rowSignature), state.language, state.stale, state.summary?.executionAvailable, state.query, state.filter, state.sort, state.sortDirection, state.roundFilter, state.otherExpanded, state.loading]);
     if (signature === entriesSignature) return;
     entriesSignature = signature;
     const positions = UI.positions(container, '.product-row');
@@ -533,7 +534,7 @@ window.DashboardNavigation.register('center', (view) => {
     // The API returns activity order; recent products are independent of execution state.
     const groups = [["recentProducts", entries.slice(0, 4)], ["otherProducts", entries.slice(4)]];
     for (const [groupIndex, [key, items]] of groups.entries()) {
-      if (!items.length) continue;
+      if (!items.length && groupIndex !== 0) continue;
       const group = element("section", "product-group");
       const heading = element("h2", "product-group-title", message(key).startsWith("filter") ? message("productList") : message(key));
       heading.append(element("span", "count-badge", formatNumber(items.length)));
@@ -541,7 +542,7 @@ window.DashboardNavigation.register('center', (view) => {
       const head = element("tr", "product-head"); head.setAttribute("role", "row");
       for (const [label, field] of [["example", "preview"], ["productName", "name"], ["runtimeStatus", "status"], ["latestRound", "round"], ["recentWork", "work"], ["updatedTime", "activity"]]) head.append(columnHeader(label, field, groupIndex === 0 ? "primary" : "remaining"));
       const shown = groupIndex === 1 ? items.slice(0, 4) : items;
-      const header = element("thead"), body = element("tbody"); header.append(head); body.append(...shown.map(renderRow)); table.append(headers[groupIndex] || header, body); group.append(heading, table);
+      const header = element("thead"), body = element("tbody"); header.append(head); body.append(...shown.map(renderRow)); table.append(headers[groupIndex] || header, body); if (items.length) group.append(heading); group.append(table);
       if (groupIndex === 1 && items.length > 4) {
         const disclosure = element("details", "other-products-disclosure"); disclosure.open = state.otherExpanded;
         const label = () => message(state.otherExpanded ? "collapseProducts" : "expandProducts", { count: items.length });
@@ -618,7 +619,19 @@ window.DashboardNavigation.register('center', (view) => {
   function renderPage() {
     if (!view.active) return;
     const focused = rememberFocus();
-    applyLanguage(); renderActivity(); renderCounts(); renderEntries(); renderQueue();
+    const languageChanged = document.documentElement.lang !== state.language;
+    applyLanguage();
+    if (languageChanged) for (const container of document.querySelectorAll(".template-controls")) {
+      const scope = container.closest(".work-group, form");
+      if (!scope || scope.dataset.templateSubmitting === "true") continue;
+      const selectedId = container.querySelector("select")?.value || "", name = container.querySelector(".template-name")?.value;
+      const expanded = container.querySelector(".template-editor")?.open;
+      renderTemplateControls(scope, selectedId);
+      if (name !== undefined) scope.querySelector(".template-name").value = name;
+      scope.querySelector(".template-editor").open = Boolean(expanded);
+    }
+    $("newWorkButton").disabled = state.stale || state.summary?.executionAvailable === false;
+    renderActivity(); renderCounts(); renderEntries(); renderQueue();
     if ($("newWorkDialog").open) updateGroupButtons();
     const executionAvailable = state.summary?.executionAvailable !== false;
     $("newWorkButton").disabled = state.stale || !executionAvailable;
@@ -669,7 +682,8 @@ window.DashboardNavigation.register('center', (view) => {
       else if (value === "preparing") groups.attention.push(request);
     }
     for (const operation of state.operations) {
-      if (operation.state === "preparing") groups.preparing.push(operation);
+      if (operation.archived || operation.state === "canceled") groups.operationHistory.push(operation);
+      else if (operation.state === "preparing") groups.preparing.push(operation);
       else if (["failed", "attention"].includes(operation.state)) groups.operationAttention.push(operation);
       else if (operation.state === "succeeded") groups.operationHistory.push(operation);
     }
@@ -738,13 +752,16 @@ window.DashboardNavigation.register('center', (view) => {
     item.append(element("span", "queue-number", ""));
     const body = element("div");
     body.append(element("h4", "", message("preparationItem")));
-    body.append(element("p", "", message(operation.state === "succeeded" ? "preparationSucceeded" : operation.state === "preparing" ? "state_preparing" : operation.state === "attention" ? "state_attention" : "state_failed")));
+    body.append(element("p", "", message(operation.state === "canceled" ? "state_canceled" : operation.state === "succeeded" ? "preparationSucceeded" : operation.state === "preparing" ? "state_preparing" : operation.state === "attention" ? "state_attention" : "state_failed")));
     if (operation.reason) body.append(element("p", "", message("attentionReason", { reason: requestReason(operation.reason) })));
     if (operation.createdAt) body.append(element("p", "", message("createdAt", { time: formatTime(operation.createdAt) })));
     const actions = element("div", "queue-actions");
-    if (operation.state !== "succeeded") {
-      const check = focusKey(element("button", "text-button", message("recheckPreparation")), `operation:${operation.operationId}:recheck`);
-      check.type = "button"; check.disabled = state.stale; check.addEventListener("click", refresh); actions.append(check);
+    if (!operation.archived && ["failed", "attention"].includes(operation.state)) {
+      for (const [action, key, enabled] of [["retry", "retryPreparation", operation.canRetry], ["restore-draft", "restorePreparationDraft", true], ["cancel", "cancelPreparation", operation.canCancel], ["archive", "archivePreparation", true]]) {
+        const button = focusKey(element("button", "text-button", message(key)), `operation:${operation.operationId}:${action}`);
+        button.type = "button"; button.disabled = state.stale || enabled === false || state.actionLocks.has(`operation:${operation.operationId}`);
+        button.onclick = () => preparationAction(operation, action); actions.append(button);
+      }
     }
     item.append(body, actions); return item;
   }
@@ -837,7 +854,13 @@ window.DashboardNavigation.register('center', (view) => {
 
   async function refresh() {
     if (!view.active) return;
-    if (state.refreshing) return state.refreshing;
+    if (state.refreshing) {
+      const pending = state.refreshing, generation = state.refreshGeneration;
+      await pending;
+      if (generation < state.writeGeneration) return refresh();
+      return;
+    }
+    const generation = state.writeGeneration; state.refreshGeneration = generation;
     const token = ++state.refreshToken;
     const promise = (async () => {
       try {
@@ -846,7 +869,7 @@ window.DashboardNavigation.register('center', (view) => {
         const [summary, entries, requests, operations, preferences] = await Promise.all([
           read("/summary"), allEntries(snapshot), read("/requests?limit=100"), read("/operations"), read("/preferences"),
         ]);
-        if (token !== state.refreshToken) return;
+        if (token !== state.refreshToken || generation !== state.writeGeneration) return;
         if (!summary || !Array.isArray(entries?.items) || !Array.isArray(requests?.items) || !Array.isArray(operations?.items)) throw new APIError({ code: "INVALID_RESPONSE" }, 200);
         state.centerId = snapshot.centerId; state.revision = snapshot.revision; state.observedAt = snapshot.observedAt;
         if (state.apiCenterId !== snapshot.centerId) { state.apiCenterId = snapshot.centerId; state.apiRevision = snapshot.revision; }
@@ -858,7 +881,7 @@ window.DashboardNavigation.register('center', (view) => {
         renderPage();
         if (state.restoreScroll !== null) { window.scrollTo(0, state.restoreScroll); state.restoreScroll = null; }
       } catch (_) {
-        if (token !== state.refreshToken) return;
+        if (token !== state.refreshToken || generation !== state.writeGeneration) return;
         state.loading = false; state.stale = true; renderPage();
       } finally {
         state.refreshing = null; clearTimeout(state.timer); if (view.active && state.autoRefresh) state.timer = setTimeout(refresh, state.stale ? 15000 : 5000);
@@ -1023,13 +1046,15 @@ window.DashboardNavigation.register('center', (view) => {
     const container = scope.querySelector(".template-controls");
     if (!container) return;
     const workGroup = scope.classList.contains("work-group");
-    const loadedRevision = state.preferences?.revision;
+    let loadedRevision = state.preferences?.revision;
+    let contextToken = state.dialogToken;
+    const isCurrent = () => scope.isConnected && contextToken === state.dialogToken;
     clear(container);
     const label = element("label"); label.append(element("span", "", message("configurationTemplate")));
     const select = element("select"); select.classList.add("template-select");
     select.append(new Option(message("automaticConfiguration"), ""));
     for (const template of state.preferences?.templates || []) {
-      select.append(new Option(template.name + (template.templateId === state.preferences.defaultTemplateId ? ` · ${message("defaultTemplate")}` : ""), template.templateId));
+      select.append(new Option(template.name + ((state.preferences.templates || []).filter(item => item.name === template.name).length > 1 ? ` · ${template.config?.model || template.config?.engine || template.templateId.slice(-8)}` : "") + (template.templateId === state.preferences.defaultTemplateId ? ` · ${message("defaultTemplate")}` : ""), template.templateId));
     }
     select.value = selectedId;
     label.append(select); container.append(label);
@@ -1050,12 +1075,13 @@ window.DashboardNavigation.register('center', (view) => {
       button.addEventListener("click", async () => {
         if (key === "saveTemplate" && !text(name.value)) { markFieldError(name, "fieldRequired"); name.focus(); return; }
         if (scope.dataset.templateSubmitting === "true") return;
+        contextToken = state.dialogToken;
         scope.dataset.templateSubmitting = "true";
         buttons.forEach((item) => { item.disabled = true; }); status.textContent = message("actionPending");
         try {
           const mutation = action();
           const result = await write("/templates", { ...mutation, expectedRevision: loadedRevision });
-          state.preferences = await api("/preferences");
+          const preferences = await api("/preferences"); if (!isCurrent()) return; state.preferences = preferences;
           for (const other of document.querySelectorAll(".template-controls")) {
             const otherScope = other.closest(".work-group, form");
             if (otherScope && otherScope !== scope) renderTemplateControls(otherScope, other.querySelector("select")?.value || "");
@@ -1063,7 +1089,9 @@ window.DashboardNavigation.register('center', (view) => {
           renderTemplateControls(scope, result.template?.templateId && mutation.action !== "delete" ? result.template.templateId : "");
           scope.querySelector(".template-editor").open = true;
           scope.querySelector(".template-status").textContent = message("templateSaved");
-        } catch (error) { status.textContent = errorText(error); }
+        } catch (error) {
+          if (isCurrent()) { status.textContent = errorText(error); reload.hidden = error.code !== "REVISION_CONFLICT"; }
+        }
         finally { delete scope.dataset.templateSubmitting; buttons.forEach((item) => { item.disabled = false; }); updateActions(); }
       });
       controls.append(button); buttons.push(button); return button;
@@ -1077,6 +1105,21 @@ window.DashboardNavigation.register('center', (view) => {
     if (scope.id === "settingsForm" && state.preferences?.defaultTemplateId) {
       addAction("clearDefaultTemplate", () => ({ action: "default", templateId: null }));
     }
+    const reload = element("button", "text-button", message("reloadTemplates")); reload.type = "button"; reload.hidden = true;
+    reload.onclick = async () => {
+      if (reload.disabled) return; reload.disabled = true;
+      try {
+        const preferences = await api("/preferences"); if (!isCurrent()) return;
+        const selectedId = select.value, draftName = name.value;
+        state.preferences = preferences; loadedRevision = preferences.revision;
+        renderTemplateControls(scope, selectedId);
+        scope.querySelector(".template-name").value = draftName;
+        scope.querySelector(".template-editor").open = true;
+        scope.querySelector(".template-status").textContent = message("templatesReloaded");
+      } catch (error) { if (isCurrent()) status.textContent = errorText(error); }
+      finally { reload.disabled = false; }
+    };
+    editor.append(reload);
     editor.append(controls, element("p", "template-hint", message("templateScopeHint")), status); container.append(editor);
     select.addEventListener("change", () => {
       const config = selected()?.config || state.preferences?.defaults || {};
@@ -1090,6 +1133,105 @@ window.DashboardNavigation.register('center', (view) => {
     updateActions();
     UI?.mountControls(container);
     if (workGroup) updateGroupButtons();
+  }
+
+  function renderChecks(container, checks) {
+    clear(container); container.hidden = !checks?.length;
+    for (const check of checks || []) {
+      const row = element("div", "check-result");
+      const passed = check.ok === true;
+      row.append(window.DashboardIcons.icon(passed ? "circle-check" : "circle-alert"));
+      row.dataset.state = passed ? "passed" : "failed";
+      const body = element("div");
+      const key = `check_${check.code || check.name}`;
+      const label = window.CENTER_MESSAGES[state.language][key] ? message(key) : check.message || check.label || check.code || message(passed ? "checkPassed" : "checkFailed");
+      body.append(element("strong", "", label));
+      if (check.code === "FRAMEWORK_UNVERIFIED") body.append(element("p", "", message("frameworkFix")));
+      else if (check.detail || check.reason) body.append(element("p", "", check.detail || check.reason));
+      row.append(body); container.append(row);
+    }
+    window.DashboardIcons.hydrate(container);
+  }
+
+  function environmentDomain() {
+    const form = $("environmentForm");
+    const candidate = state.environment?.candidates?.find(item => item.id === form.elements.candidate.value);
+    const domain = { ...(candidate?.domain || candidate || {}) };
+    delete domain.id; delete domain.label;
+    if (domain.platform === "wsl") domain.user = text(form.elements.user.value);
+    return domain;
+  }
+  function selectEnvironment() {
+    state.environmentToken += 1;
+    const form = $("environmentForm"), domain = environmentDomain();
+    $("environmentUserLabel").hidden = domain.platform !== "wsl";
+    form.elements.user.required = domain.platform === "wsl";
+    renderChecks($("environmentChecks"), []); setFormStatus(form, "");
+  }
+  async function openEnvironment() {
+    openDialog($("environmentDialog"));
+    const form = $("environmentForm"), token = ++state.environmentToken;
+    const current = () => token === state.environmentToken && $("environmentDialog").open;
+    state.environment = null; form.elements.candidate.replaceChildren(); form.elements.user.value = "";
+    form.querySelectorAll("button:not(.dialog-close)").forEach(button => { button.disabled = true; });
+    renderChecks($("environmentChecks"), []); setFormStatus(form, message("loading"));
+    try {
+      const value = await api("/environment"); if (!current()) return;
+      state.environment = value;
+      for (const candidate of value.candidates || []) form.elements.candidate.append(new Option(candidate.label || candidate.id, candidate.id));
+      const selected = value.candidates?.find(item => { const domain = item.domain || item; return domain.platform === value.domain?.platform && domain.distribution === value.domain?.distribution; });
+      if (selected) form.elements.candidate.value = selected.id;
+      form.elements.user.value = value.domain?.user || "";
+      $("environmentCurrent").textContent = value.domain ? message("connectedEnvironment", { name: [value.domain.distribution || value.domain.platform, value.domain.user].filter(Boolean).join(" · ") }) : message("environmentNotConnected");
+      selectEnvironment(); renderChecks($("environmentChecks"), value.checks);
+    } catch (error) { if (current()) setFormStatus(form, errorText(error), true); }
+    finally { if ($( "environmentDialog").open && state.environment) form.querySelectorAll("button:not(.dialog-close)").forEach(button => { button.disabled = !form.elements.candidate.options.length; }); }
+  }
+  async function environmentAction(action) {
+    const form = $("environmentForm"), dialog = $("environmentDialog");
+    if (!dialog.open || !state.environment || !form.reportValidity()) return;
+    const token = state.environmentToken, dialogToken = state.dialogToken, domain = environmentDomain(), signature = JSON.stringify(domain);
+    const current = () => token === state.environmentToken && dialog.open && JSON.stringify(environmentDomain()) === signature;
+    const button = action === "check" ? $("environmentCheck") : form.querySelector('[type="submit"]');
+    if (!beginSubmission(form, "actionPending", button)) return;
+    form.querySelectorAll("button:not(.dialog-close), input, select").forEach(item => { item.disabled = true; });
+    try {
+      const result = await write(`/environment/${action}`, { domain, expectedRevision: state.environment.revision }, 60000);
+      if (action === "connect") { resetImportProbe(); await refresh(); }
+      if (!current()) return;
+      if (result.revision !== undefined) state.environment.revision = result.revision;
+      renderChecks($("environmentChecks"), result.checks);
+      setFormStatus(form, message(action === "connect" ? "environmentConnected" : result.ready === false || result.checks?.some(item => item.ok === false) ? "environmentCheckFailed" : "environmentChecked"));
+      if (action === "connect") $("environmentCurrent").textContent = message("connectedEnvironment", { name: [domain.distribution || domain.platform, domain.user].filter(Boolean).join(" · ") });
+    } catch (error) { if (current()) setFormStatus(form, errorText(error), true); }
+    finally { if (dialog.open && dialogToken === state.dialogToken) { endSubmission(form, button); form.querySelectorAll("button:not(.dialog-close), input, select").forEach(item => { item.disabled = false; }); } }
+  }
+
+  async function preparationAction(operation, action) {
+    const lock = `operation:${operation.operationId}`; if (state.actionLocks.has(lock)) return;
+    const dialogToken = state.dialogToken, drawer = $("queueDrawer");
+    state.actionLocks.add(lock); renderQueue();
+    try {
+      const result = await write(`/operations/${encodeURIComponent(operation.operationId)}/${action}`, { expectedRevision: operation.revision }, 60000);
+      if (action === "restore-draft") {
+        if (state.dialogToken !== dialogToken || !drawer.open) return;
+        restoreWorkDraft(result.draft); closeQueue(); openDialog($("newWorkDialog"));
+      } else { showStatus("actionAccepted"); await refresh(); }
+    } catch (error) { showStatus("requestFailed", { detail: errorText(error) }, true); }
+    finally { state.actionLocks.delete(lock); renderQueue(); }
+  }
+  function restoreWorkDraft(draft) {
+    const form = $("newWorkForm"), groups = $("workGroups"), template = groups.firstElementChild.cloneNode(true);
+    form.reset(); groups.replaceChildren();
+    for (const saved of draft.groups) {
+      const group = template.cloneNode(true); groups.append(group); setupGroup(group);
+      for (const [key, value] of Object.entries({ ...saved.config, count: saved.count, direction: saved.direction })) {
+        const field = group.querySelector(`[name="${key}"]`); if (field) field.value = value;
+      }
+    }
+    form.elements.executionMode.value = "enqueue";
+    selectWorkGroup(groups.firstElementChild); renderChecks($("workChecks"), []);
+    setFormStatus(form, message("preparationDraftRestored"));
   }
 
   async function saveCapacity(event) {
@@ -1136,7 +1278,12 @@ window.DashboardNavigation.register('center', (view) => {
     state.workSubmitting = true;
     try {
       const groups = [...form.querySelectorAll(".work-group")].map((group) => ({ count: Number(group.querySelector('[name="count"]').value), direction: text(group.querySelector('[name="direction"]').value), config: formConfig(group) }));
-      const batch = await write("/explorations/batch", { groups, executionMode: form.elements.executionMode.value }, 60000);
+      setFormStatus(form, message("preflightPending"));
+      const checked = await write("/preflight", { groups }, 60000);
+      if (!context.unchanged()) return;
+      renderChecks($("workChecks"), checked.checks);
+      if (!checked.ready) { setFormStatus(form, message("preflightFailed"), true); return; }
+      const batch = await write("/explorations/batch", { groups, executionMode: form.elements.executionMode.value, environmentRevision: checked.environmentRevision }, 60000);
       for (const operation of batch.items || []) state.operations = [operation, ...state.operations.filter((item) => item.operationId !== operation.operationId)];
       const completedCurrentForm = context.unchanged();
       if (completedCurrentForm) closeDialog(dialog);
@@ -1183,8 +1330,9 @@ window.DashboardNavigation.register('center', (view) => {
     if (!beginSubmission(form, "actionPending", button)) return;
     $("probeButton").disabled = true;
     try {
-      await write("/imports/commit", { candidateId: probe.candidateId, candidateHash: probe.candidateHash, mode: form.elements.mode.value === "reference" ? "reference" : "readonly", expectedRevision: state.apiRevision ?? state.revision }, 60000);
+      const imported = await write("/imports/commit", { candidateId: probe.candidateId, candidateHash: probe.candidateHash, mode: form.elements.mode.value === "reference" ? "reference" : "readonly", expectedRevision: state.apiRevision ?? state.revision }, 60000);
       if (isCurrent()) closeDialog(dialog);
+      if (form.elements.mode.value === "reference") state.filter = "reference";
       showStatus("importComplete"); await refresh();
     } catch (error) { if (isCurrent()) setFormStatus(form, message("requestFailed", { detail: errorText(error) }), true); }
     finally { if (isCurrent()) { endSubmission(form, button); $("probeButton").disabled = false; } }
@@ -1299,6 +1447,52 @@ window.DashboardNavigation.register('center', (view) => {
     managementAction(actions, "selectSource", !current, current ? "UNSUPPORTED" : "", async () => {
       sourceStatus(message("actionPending")); try { await write(`/entries/${encodeURIComponent(entry.entryId)}/source-selection`, { sourceId: source.sourceId, expectedRevision: entry.revision }); await refreshSourceManager("sourceSelected", isCurrent); } catch (error) { if (isCurrent()) sourceStatus(message("requestFailed", { detail: errorText(error) }), true); }
     });
+    const recovery = capability(entry, "reviewRecovery");
+    for (const lockOnly of [false, true]) {
+      const allowed = lockOnly ? capability(entry, "reviewProductLock").enabled || entry.recovery?.canReviewLock : recovery.enabled || entry.recovery?.canReview;
+      if (!current || !allowed) continue;
+      managementAction(actions, lockOnly ? "reviewProductLock" : "reviewRecovery", !state.stale, "", async () => {
+        sourceStatus(message("actionPending"));
+        const request = { expectedRevision: source.revision, expectedSourceRevision: source.sourceRevision };
+        try {
+          const review = await write(`/sources/${encodeURIComponent(source.sourceId)}/${lockOnly ? "review-product-lock" : "review-recovery"}`, request, 60000);
+          if (review.expectedRevision !== undefined) request.expectedRevision = review.expectedRevision;
+          if (review.expectedSourceRevision !== undefined) request.expectedSourceRevision = review.expectedSourceRevision;
+          if (!isCurrent()) return;
+          body.querySelector(".recovery-review")?.remove();
+          const panel = element("section", "recovery-review");
+          panel.append(element("h3", "", message("recoveryReview")));
+          const checks = element("div", "check-results"); renderChecks(checks, review.checks); panel.append(checks);
+          for (const reason of review.reasons || []) panel.append(element("p", "", capabilityReason(typeof reason === "string" ? reason : reason.message || reason.code)));
+          const lock = review.canRecoverLock === true;
+          if (review.canConfirm || lock) {
+            const fields = lock ? [["confirmAllWritersStopped", "confirmWritersStopped"], ["confirmLockRecoveryScope", "confirmLockScope"]]
+              : [["confirmCodeEffects", "confirmCodeEffects"], ["confirmExternalEffects", "confirmExternalEffects"]];
+            const acknowledgements = [];
+            for (const [name, key] of fields) {
+              const label = element("label", "radio-row"), input = element("input"); input.type = "checkbox"; input.name = name;
+              label.append(input, element("span", "", message(key))); panel.append(label); acknowledgements.push(input);
+            }
+            const confirm = element("button", "button secondary", message(lock ? "recoverLock" : "confirmRecovery")); confirm.type = "button"; confirm.disabled = true;
+            const update = () => { confirm.disabled = !acknowledgements.every(input => input.checked) || state.stale; };
+            acknowledgements.forEach(input => input.addEventListener("change", update));
+            confirm.onclick = async () => {
+              const owner = $("sourceManagerBody"); if (!isCurrent() || owner.dataset.submitting === "true") return;
+              owner.dataset.submitting = "true"; syncSourceActions(); confirm.disabled = true;
+              try {
+                await write(`/sources/${encodeURIComponent(source.sourceId)}/${lock ? "confirm-product-lock" : "confirm-recovery"}`, { ...request,
+                  ...(lock ? { lockReviewToken: review.lockReviewToken } : { reviewToken: review.reviewToken }),
+                  ...Object.fromEntries(acknowledgements.map(input => [input.name, input.checked])) }, 60000);
+                await refreshSourceManager(lock ? "lockRecovered" : "recoveryConfirmed", isCurrent);
+              } catch (error) { if (isCurrent()) sourceStatus(errorText(error), true); }
+              finally { delete owner.dataset.submitting; syncSourceActions(); if (isCurrent()) update(); }
+            };
+            panel.append(confirm);
+          }
+          body.append(panel); UI.mountControls(panel); sourceStatus(message("recoveryNotStarted"));
+        } catch (error) { if (isCurrent()) sourceStatus(errorText(error), true); }
+      });
+    }
     const sourceRevision = source.revision;
     managementAction(actions, "reconnectSource", current && !release.enabled, !current ? "selectCurrentFirst" : release.enabled ? "releaseFirst" : "", async () => {
       if (!text(root.value)) { reconnectStatusToken = sourceStatus(message("requestFailed", { detail: message("folderPath") }), true); root.focus(); return; }
@@ -1401,7 +1595,7 @@ window.DashboardNavigation.register('center', (view) => {
   }
 
   function confirmRequestAction(request, action) {
-    confirmAction(action === "stop" ? "stopTitle" : "cancelTitle", action === "stop" ? "stopMessage" : "cancelMessage", () => runRequestAction(request, action, true), action === "stop", request.displayName || message(`kind_${request.kind}`), action === "stop" ? "stopItem" : "cancelItem");
+    confirmAction(action === "stop" ? "stopTitle" : "cancelTitle", action === "stop" ? "stopMessage" : "cancelMessage", () => runRequestAction(request, action, true), action === "stop", request.displayName || message(`kind_${request.kind}`), action === "stop" ? "stopItem" : "confirmCancelRequest");
   }
 
   async function runRequestAction(request, action, propagate = false) {
@@ -1465,6 +1659,12 @@ window.DashboardNavigation.register('center', (view) => {
 
   function wire() {
     state.loadStarted = performance.now();
+    view.listen(window, "dashboard:environment", openEnvironment);
+    $("environmentForm").addEventListener("submit", event => { event.preventDefault(); environmentAction("connect"); });
+    $("environmentCheck").addEventListener("click", () => environmentAction("check"));
+    $("environmentForm").elements.candidate.addEventListener("change", selectEnvironment);
+    $("environmentForm").elements.user.addEventListener("input", selectEnvironment);
+    $("environmentDialog").addEventListener("close", () => { ++state.environmentToken; });
     $("queueNavButton").addEventListener("click", openQueue); $("closeQueueButton").addEventListener("click", closeQueue);
     $("queueDrawer").addEventListener("close", () => { state.drawerOpen = false; $("queueNavButton").setAttribute("aria-expanded", "false"); });
     $("dispatchButton").addEventListener("click", toggleDispatch);
@@ -1475,7 +1675,7 @@ window.DashboardNavigation.register('center', (view) => {
       confirmAction("stopAllTitle", "stopAllMessage", async () => { await write("/queue/stop-all", { expectedRevision: state.summary?.queueRevision }, 60000); showStatus("actionAccepted"); await refresh(); }, true, names.join(" · "), "stopAll");
     });
     $("queueHistoryButton").addEventListener("click", () => { state.historyVisible = !state.historyVisible; renderQueue(); });
-    $("newWorkButton").addEventListener("click", () => { if ($("newWorkDialog").closest("[data-motion-exit]")) { $("newWorkDialog").showModal(); return; } const form = $("newWorkForm"); form.reset(); while ($("workGroups").children.length > 1) $("workGroups").lastElementChild.remove(); setupGroup($("workGroups").firstElementChild); setFormStatus(form, ""); openDialog($("newWorkDialog")); });
+    $("newWorkButton").addEventListener("click", () => { if ($("newWorkDialog").closest("[data-motion-exit]")) { $("newWorkDialog").showModal(); return; } const form = $("newWorkForm"); renderChecks($("workChecks"), []); form.reset(); while ($("workGroups").children.length > 1) $("workGroups").lastElementChild.remove(); setupGroup($("workGroups").firstElementChild); setFormStatus(form, ""); openDialog($("newWorkDialog")); });
     $("importButton").addEventListener("click", () => { if ($("importDialog").closest("[data-motion-exit]")) { $("importDialog").showModal(); return; } const form = $("importForm"); form.reset(); resetImportProbe(); openDialog($("importDialog")); });
     $("settingsButton").addEventListener("click", () => {
       const dialog = $("settingsDialog");
@@ -1497,6 +1697,7 @@ window.DashboardNavigation.register('center', (view) => {
       const group = event.target.closest(".work-group"); if (group) selectWorkGroup(group);
     }, true);
     $("newWorkForm").addEventListener("change", (event) => { if (event.target.name === "executionMode") updateGroupButtons(); });
+    $("capacityForm").addEventListener("input", event => { event.currentTarget.dataset.dirty = "true"; });
     $("capacityForm").addEventListener("change", (event) => {
       const form = event.currentTarget; form.dataset.dirty = "true";
       form.elements.capacity.disabled = form.elements.unlimited.checked;
@@ -1531,6 +1732,7 @@ window.DashboardNavigation.register('center', (view) => {
   }
 
   applyLanguage(); wire(); renderPage(); refresh();
+  if (new URL(view.url).hash === "#environment") openEnvironment();
   setTimeout(() => { if (state.loading) renderEntries(); }, 300);
   state.projectionTimer = setInterval(refreshRuntimeProjection, 1000);
   return {

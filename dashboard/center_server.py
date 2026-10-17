@@ -73,6 +73,9 @@ class CenterServer(ThreadingHTTPServer):
         self.store = store
         self.catalog = catalog
         self.runtime = runtime
+        self.catalog.path_resolver = runtime.resolve_import_path
+        self.catalog.managed_observer = runtime.observe_source
+        self.catalog.execution_query = runtime.execution_query
         self.framework_root = Path(framework_root)
         self.legacy = JournalSource(self.framework_root)
         super().__init__(address, CenterHandler)
@@ -241,6 +244,8 @@ class CenterHandler(BaseHTTPRequestHandler):
             self.result(runtime.list_operations(query))
         elif route == "/preferences":
             self.result(runtime.preferences())
+        elif route == "/environment":
+            self.result(runtime.environment())
         elif match := re.fullmatch(rf"/requests/({IDENTIFIER})", route):
             self.result(runtime.get_request(match[1]))
         elif match := re.fullmatch(rf"/operations/({IDENTIFIER})", route):
@@ -297,11 +302,17 @@ class CenterHandler(BaseHTTPRequestHandler):
             self.result(runtime.create_request(body), 202)
         elif route == "/preferences":
             self.result(runtime.preferences(body))
+        elif route == "/preflight":
+            self.result(runtime.preflight(body))
+        elif match := re.fullmatch(r"/environment/(check|connect)", route):
+            self.result(runtime.environment_action(match[1], body))
+        elif match := re.fullmatch(rf"/operations/({IDENTIFIER})/(cancel|archive|retry|restore-draft)", route):
+            self.result(runtime.operation_action(match[1], match[2], body))
         elif match := re.fullmatch(rf"/requests/({IDENTIFIER})/(cancel|stop|reconcile)", route):
             self.result(runtime.request_action(match[1], match[2], body), 202)
         elif match := re.fullmatch(r"/queue/(order|pause|resume|stop-all|capacity)", route):
             self.result(runtime.queue_action(match[1], body))
-        elif match := re.fullmatch(rf"/sources/({IDENTIFIER})/(takeover|release|reconnect)", route):
+        elif match := re.fullmatch(rf"/sources/({IDENTIFIER})/(takeover|release|reconnect|review-recovery|confirm-recovery|review-product-lock|confirm-product-lock)", route):
             if match[2] == "reconnect":
                 self.result(catalog.reconnect(match[1], body))
             else:

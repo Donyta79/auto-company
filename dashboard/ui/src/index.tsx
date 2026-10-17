@@ -43,6 +43,18 @@ function installModal(original: HTMLElement, sheet = false) {
   let returnFocus: HTMLElement | null = null;
   let queueOrigin = false;
   let content: HTMLDivElement | null = null;
+  const liveRegions = new Map<HTMLElement, string>();
+  const setLiveRegions = (scope: HTMLElement, active: boolean) => {
+    if (active) liveRegions.forEach((value, node) => { if (scope.contains(node)) node.setAttribute("aria-live", value); });
+    else {
+      // Parked live regions make Radix hide their siblings individually; those
+      // stale hidden attributes would follow authored content into a nested modal.
+      scope.querySelectorAll<HTMLElement>("[aria-live]").forEach(node => {
+        liveRegions.set(node, node.getAttribute("aria-live")!); node.removeAttribute("aria-live");
+      });
+    }
+  };
+  setLiveRegions(original, false);
   let exiting: { surface: HTMLElement; slot: HTMLElement; overlay: HTMLElement | null } | null = null;
   let revision = 0;
   let entrance: { visual: { opacity: string; transform: string; rect: DOMRect } | null } | null = null;
@@ -116,15 +128,26 @@ function installModal(original: HTMLElement, sheet = false) {
       node.id = id;
       while (original.firstChild) node.append(original.firstChild);
       content = node;
+      setLiveRegions(node, true);
       bind(node);
       enter(node);
     } else if (content) {
+      setLiveRegions(content, false);
       while (content.firstChild) original.append(content.firstChild);
       original.id = id;
       content = null;
     }
   };
   const bind = (node: HTMLElement) => {
+    node.onkeydown = (event: KeyboardEvent) => {
+        if (event.key !== "Tab" || event.defaultPrevented || !content?.contains(event.target as Node)) return;
+        const controls = [...content.querySelectorAll<HTMLElement>('a[href], button, input, select, textarea, [tabindex]')].filter(node =>
+          node.tabIndex >= 0 && !node.matches(':disabled') && !node.closest('[hidden], [inert], [aria-hidden="true"]') && node.getClientRects().length);
+        const destination = event.shiftKey && document.activeElement === controls[0] ? controls.at(-1)
+          : !event.shiftKey && document.activeElement === controls.at(-1) ? controls[0] : null;
+        if (destination) { event.preventDefault(); destination.focus(); }
+    };
+
     Object.defineProperty(node, "open", { configurable: true, get: () => open });
     (node as ModalElement).showModal = () => change(true);
     (node as ModalElement).close = (instant = false) => change(false, instant);
@@ -256,7 +279,12 @@ function ProfileMenu() {
         <ChevronDown className="profile-chevron" aria-hidden="true" />
       </Button>
     </DropdownMenuTrigger>
-    <DropdownMenuContent className="ac-menu local-menu" aria-label={chinese ? "本机" : "Local"} align="end" sideOffset={4} />
+    <DropdownMenuContent className="ac-menu local-menu" aria-label={chinese ? "本机" : "Local"} align="end" sideOffset={4}>
+      <DropdownMenuItem onSelect={() => setTimeout(() => {
+        if (document.getElementById("environmentDialog")) window.dispatchEvent(new Event("dashboard:environment"));
+        else (window as any).DashboardNavigation.navigate("/center").then(() => window.dispatchEvent(new Event("dashboard:environment")));
+      }, 0)}>{chinese ? "运行环境" : "Runtime environment"}</DropdownMenuItem>
+    </DropdownMenuContent>
   </DropdownMenu>;
 }
 

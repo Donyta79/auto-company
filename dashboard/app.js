@@ -118,7 +118,7 @@ window.DashboardNavigation.register('journal', (view) => {
       const response = await fetch(url, { cache: 'no-store', ...options, signal: controller.signal });
       const result = await response.json();
       if (!request.valid()) throw new DOMException('Inactive view', 'AbortError');
-      if (!response.ok || result.ok === false) throw new Error(result.error || result.output || `HTTP ${response.status}`);
+      if (!response.ok || result.ok === false) throw Object.assign(new Error(result.error || result.output || `HTTP ${response.status}`), { status: response.status, code: result.code });
       return result;
     } finally { clearTimeout(timer); request.done(); }
   }
@@ -430,6 +430,15 @@ window.DashboardNavigation.register('journal', (view) => {
       time: check?.endedAt || check?.recordedAt || check?.startedAt,
       path: check?.available === true && !scope.center ? check.path : null,
       url: check?.available === true && scope.center ? safeScopedResource(check.url) : null });
+    for (const earlier of cycle.checks || []) {
+      const identity = item => item?.id || item?.url || item?.path;
+      if (earlier === check || (identity(earlier) && identity(earlier) === identity(check))) continue;
+      const previous = checkPresentation({ latestCheck: earlier, checkStatus: earlier.evidenceStatus });
+      rows.push({ kind: 'check-history', title: message('earlierCheck'), status: previous.status, detail: previous.detail,
+        time: earlier.endedAt || earlier.recordedAt || earlier.startedAt,
+        path: earlier.available === true && !scope.center ? earlier.path : null,
+        url: earlier.available === true && scope.center ? safeScopedResource(earlier.url) : null });
+    }
     for (const artifact of cycle.artifacts || []) {
       if (artifact.kind !== 'document') continue;
       rows.push({ kind: 'document', time: artifact.recordedAt, title: message(artifact.available === true ? 'documentRecorded' : 'documentUnavailable'),
@@ -1232,6 +1241,13 @@ window.DashboardNavigation.register('journal', (view) => {
         if (item.command && !commands.has(item.id || item.command)) { lines.push('', `$ ${item.command}`); commands.add(item.id || item.command); }
         if (item.aggregated_output) lines.push(item.aggregated_output.trimEnd());
         if (Number.isInteger(item.exit_code)) lines.push(`${message('logExitCode')}: ${item.exit_code}`);
+      } else if (item?.type === 'file_change') {
+        lines.push('', message('logFilesChanged'));
+        for (const change of item.changes || []) lines.push(`${typeof change.kind === 'string' ? change.kind : change.kind?.type || ''} · ${change.path || ''}`);
+      } else if (item?.type === 'collab_agent_tool_call') {
+        lines.push('', `${message('logCollaboration')}: ${item.tool || item.name || ''} · ${item.status || ''}`);
+        if (item.prompt) lines.push(item.prompt);
+        for (const [id, agent] of Object.entries(item.agents_states || {})) lines.push(`${id}: ${agent.status || ''}${agent.message ? '\n' + agent.message : ''}`);
       } else if (typeof item?.text === 'string') {
         lines.push('', item.text);
       } else if (event.type === 'thread.started' || event.type === 'turn.started') {
@@ -1253,6 +1269,7 @@ window.DashboardNavigation.register('journal', (view) => {
     return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
   }
   function showLog(value, key, range) {
+    $('rawLogText').textContent = value || '';
     value = value ? readableLog(value, logCycles().find(cycle => cycle.id === state.selectedLog)) : '';
     const node = $('logText');
     const same = state.logLoadedKey === key;
@@ -1277,7 +1294,7 @@ window.DashboardNavigation.register('journal', (view) => {
     if (state.logPending) {
       if (state.logPending.key !== key) {
         ++state.logRequest;
-        if (state.logLoadedKey !== key) { state.logText = ''; $('logText').textContent = ''; $('copyLogButton').disabled = true; }
+        if (state.logLoadedKey !== key) { state.logText = ''; $('logText').textContent = ''; $('rawLogText').textContent = ''; $('copyLogButton').disabled = true; }
         await state.logPending.promise;
         return loadLog();
       }
@@ -1286,7 +1303,7 @@ window.DashboardNavigation.register('journal', (view) => {
     const request = ++state.logRequest;
     const id = state.selectedLog;
     const previous = state.logLoadedKey === key ? state.logText : '';
-    if (state.logLoadedKey !== key) $('logText').textContent = '';
+    if (state.logLoadedKey !== key) { $('logText').textContent = ''; $('rawLogText').textContent = ''; }
     if (state.logLoadedKey !== key) { state.logText = ''; state.logLoadedAt = null; $('newLogButton').hidden = true; }
     $('copyLogButton').disabled = !previous;
     $('copyLogButton').textContent = message('copy');
@@ -1425,13 +1442,13 @@ window.DashboardNavigation.register('journal', (view) => {
       if (scope.center) refreshCenterContext();
       $('refreshStatus').textContent = message('refreshed', { time: formatTime(data.generatedAt || new Date().toISOString()) });
       if (state.tab === 'logs') await loadLog();
-    } catch (_) {
+    } catch (error) {
       if (!view.active) return;
       state.statusFailed = true;
       state.signature = '';
       $('loadingState').hidden = true;
       $('connectionError').hidden = false;
-      connectionNotice(state.data ? 'stale' : 'readFailed');
+      connectionNotice(scope.center && error.status === 404 ? 'objectMissing' : state.data ? 'stale' : 'readFailed');
       $('refreshStatus').textContent = state.data?.generatedAt ? message('lastUpdated', { time: formatTime(state.data.generatedAt, true) }) : '';
       if (state.data) {
         if (scope.center) renderCenterLiveState();

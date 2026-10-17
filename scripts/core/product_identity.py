@@ -14,6 +14,8 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
+import threading
 import sys
 import tempfile
 import time
@@ -189,6 +191,36 @@ def commit_transaction(root, before, state, markers):
 
 
 @contextmanager
+def transaction_signals():
+    """Let an owned CLI unwind its transaction on TERM before exiting."""
+    if os.name == "nt" or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+    def terminate(signum, frame):
+        # A second TERM must not interrupt the lock's finally cleanup.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+@contextmanager
+def transaction_signal_mask():
+    # Keep acquisition+ownership bookkeeping and release indivisible to TERM.
+    enabled = hasattr(signal, "pthread_sigmask") and threading.current_thread() is threading.main_thread()
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM}) if enabled else None
+    try:
+        yield
+    finally:
+        if enabled:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+@contextmanager
 def transaction(root, timeout=5):
     from namespace_guard import check_root
     check_root(root)
@@ -196,25 +228,31 @@ def transaction(root, timeout=5):
     folder.mkdir(exist_ok=True)
     lock = safe_path(root, ".autonomous-company/product-state.lock")
     deadline = time.monotonic() + timeout
-    while True:
+    with transaction_signals():
+        acquired = False
         try:
-            lock.mkdir()
-            break
-        except FileExistsError:
-            if time.monotonic() >= deadline:
-                raise ValueError("Product state is busy; after stopping all writers, use recover-lock --confirm STOPPED")
-            time.sleep(0.025)
-    try:
-        recover_transaction(root)
-        state = read_state(root)
-        before = json.loads(json.dumps(state))
-        markers = []
-        state["_pendingMarkers"] = markers
-        yield state
-        del state["_pendingMarkers"]
-        commit_transaction(root, before, state, markers)
-    finally:
-        lock.rmdir()
+            while True:
+                try:
+                    with transaction_signal_mask():
+                        lock.mkdir()
+                        acquired = True
+                    break
+                except FileExistsError:
+                    if time.monotonic() >= deadline:
+                        raise ValueError("Product state is busy; after stopping all writers, use recover-lock --confirm STOPPED")
+                    time.sleep(0.025)
+            recover_transaction(root)
+            state = read_state(root)
+            before = json.loads(json.dumps(state))
+            markers = []
+            state["_pendingMarkers"] = markers
+            yield state
+            del state["_pendingMarkers"]
+            commit_transaction(root, before, state, markers)
+        finally:
+            if acquired:
+                with transaction_signal_mask():
+                    lock.rmdir()
 
 
 def _marker(root, project):

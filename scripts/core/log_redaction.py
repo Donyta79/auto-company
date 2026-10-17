@@ -37,10 +37,20 @@ def _secret_values() -> set[str]:
 
 def _replace_secrets(value: str, secrets: set[str]) -> str:
     if secrets:
-        # One pass, longest first: overlapping values cannot expose a suffix,
-        # and replacements are never reinterpreted as another secret.
-        pattern = "|".join(re.escape(secret) for secret in sorted(secrets, key=len, reverse=True))
-        value = re.sub(pattern, "[REDACTED]", value)
+        # Mask the union of original intervals, including intersecting secrets.
+        # Replacements are never reinterpreted as another configured secret.
+        covered = bytearray(len(value))
+        for secret in secrets:
+            start = 0
+            while (start := value.find(secret, start)) != -1:
+                covered[start:start + len(secret)] = b"\x01" * len(secret)
+                start += 1
+        result, offset = [], 0
+        for match in re.finditer(b"\x01+", covered):
+            result.extend((value[offset:match.start()], "[REDACTED]"))
+            offset = match.end()
+        result.append(value[offset:])
+        value = "".join(result)
     return value
 
 

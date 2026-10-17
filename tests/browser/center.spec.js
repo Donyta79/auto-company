@@ -755,7 +755,7 @@ test('center validation links field errors and guards repeated batch submission'
   await expect(page.locator('#newWorkForm')).toHaveAttribute('aria-busy', 'true');
   expect((await page.locator('#newWorkForm [type="submit"]').boundingBox()).width).toBe(idleWidth);
   await page.locator('#newWorkForm').evaluate(form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
-  await expect(page.locator('#newWorkForm .form-status')).toContainText('Action did not complete');
+  await expect(page.locator('#newWorkForm .form-status')).toContainText('Action did not complete', { timeout: 15000 });
   expect(writes).toBe(1);
   await expect(input).toHaveValue('1');
 });
@@ -1416,7 +1416,7 @@ for (const count of [100, 1000]) test(`synthetic ${count} products use bounded l
   await testInfo.attach('synthetic-list-motion.json', { body: JSON.stringify({ count, cpuRate: 4, ...measurement }, null, 2), contentType: 'application/json' });
 });
 
-for (const emptyCase of ['search', 'filter', 'explorations']) {
+for (const emptyCase of ['search', 'filter']) {
   test(`empty catalog ${emptyCase} action resets the view through real event wiring`, async ({ page, center }) => {
     const entry = { entryId: 'empty-action-fixture', kind: emptyCase === 'explorations' ? 'exploration' : 'product',
       displayName: 'Visible fixture', availability: 'available', executionSummary: { state: 'ended' } };

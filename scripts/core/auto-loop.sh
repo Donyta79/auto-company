@@ -305,6 +305,7 @@ cleanup() {
         final_state="process_cleanup_failed"
         log "Process-tree cleanup could not be confirmed for cycle PGID ${CYCLE_SUPERVISOR_LAST_PGID}"
     else
+        adapter_log_finish
         if [ -n "${AUTONOMOUS_COMPANY_CYCLE_ID:-}" ]; then
             python3 "$SCRIPT_DIR/runtime_artifacts.py" --root "$PROJECT_DIR" finalize \
                 --cycle "$AUTONOMOUS_COMPANY_CYCLE_ID" --cleanup-only >/dev/null 2>&1 || true
@@ -327,6 +328,10 @@ cleanup() {
             record_cycle_usage >/dev/null
             rm -f "$ADAPTER_OUTPUT_FILE"
             ADAPTER_OUTPUT_FILE=""
+            if [ -n "${ADAPTER_OUTPUT_DIRECTORY:-}" ]; then
+                rmdir "$ADAPTER_OUTPUT_DIRECTORY"
+                ADAPTER_OUTPUT_DIRECTORY=""
+            fi
         fi
         # The engine must be stopped before restoring its interrupted governance baseline.
         "$CONSENSUS_GUARD" recover || true
@@ -784,6 +789,11 @@ Resume the work and phase in the current consensus. First-exploration rules appl
         cleanup 1 usage_accounting_error
     fi
     run_engine_cycle "$FULL_PROMPT"
+
+    if [ "${ADAPTER_LOG_FAILED:-0}" -ne 0 ]; then
+        log_cycle "$loop_count" "FAIL" "Runtime log safety check failed; refusing another cycle"
+        cleanup 1 runtime_log_error
+    fi
 
     if [ "$CYCLE_SUPERVISOR_CLEANUP_FAILED" -ne 0 ]; then
         log_cycle "$loop_count" "FAIL" "Process-tree cleanup could not be confirmed for cycle PGID ${CYCLE_SUPERVISOR_LAST_PGID}; refusing to start another cycle"
