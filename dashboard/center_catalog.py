@@ -67,6 +67,31 @@ class CenterCatalog:
         self._stat_signatures = {}
         self._refresh_lock = threading.Lock()
         self._source_refresh_lock = threading.RLock()
+        self.managed_observer = None
+        self.execution_query = None
+        self.path_resolver = None
+
+    def _snapshot(self, source, reader, **kwargs):
+        managed, config = False, None
+        if source.get('runtimeId'):
+            with self.store.transaction() as tx:
+                runtime = tx.get('runtimes', source['runtimeId']) or {}
+            if runtime.get('managed') is True:
+                observed = self.managed_observer(source) if callable(self.managed_observer) else {}
+                managed = observed.get('managed') is True
+                status = observed.get('status')
+                config = observed.get('config') if managed else None
+            elif runtime.get('managed') is False:
+                status = self.readonly_observer.status(reader)
+            else:
+                status = None
+        else:
+            status = self.readonly_observer.status(reader)
+        observation = scoped_observation(reader, status)
+        active = status if managed and config is not None or observation and observation.get('currentCycleId') else None
+        data = reader.snapshot(status=active, runtime_config=config, **kwargs)
+        data['readOnly'] = bool(data.get('readOnly')) or not managed
+        return data, observation
 
     def _scan(self, root, kind_hint=None):
         from namespace_guard import check_root
@@ -123,12 +148,14 @@ class CenterCatalog:
         return {'root': str(root), 'items': items, 'fingerprint': digest(evidence), 'warnings': []}
 
     def probe(self, body):
-        root = root_path(body.get('root'))
+        binding = self.path_resolver(body.get('root')) if callable(self.path_resolver) else None
+        root = root_path(binding['root'] if binding else body.get('root'))
         kind_hint = body.get('kindHint')
         if kind_hint is not None and (not isinstance(kind_hint, str) or kind_hint != 'reference'):
             raise CenterError('INVALID_INPUT', 'Unsupported source kind hint.')
         scan = self._scan(root, kind_hint)
         candidate = {**scan, 'candidateId': uid('candidate'), 'candidateHash': digest(scan),
+                     'inputRoot': body.get('root'), 'pathBinding': binding,
                      'kindHint': kind_hint,
                      'createdAt': now(), 'expiresAt': (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()}
         with self.store.transaction() as tx:
@@ -150,6 +177,10 @@ class CenterCatalog:
             raise CenterError('CANDIDATE_INVALID', 'Import candidate is missing or does not match.', 409)
         if datetime.fromisoformat(candidate['expiresAt']) < datetime.now(timezone.utc):
             raise CenterError('CANDIDATE_EXPIRED', 'Import candidate expired; probe again.', 409)
+        if candidate.get('pathBinding') is not None:
+            binding = self.path_resolver(candidate['inputRoot']) if callable(self.path_resolver) else None
+            if binding != candidate['pathBinding']:
+                raise CenterError('SOURCE_CHANGED', 'Execution environment or path mapping changed; probe again.', 409)
         current = self._scan(root_path(candidate['root']), candidate.get('kindHint'))
         if current['fingerprint'] != candidate['fingerprint']:
             raise CenterError('SOURCE_CHANGED', 'Source changed after inspection; probe again.', 409)
@@ -287,21 +318,43 @@ class CenterCatalog:
                 source['explorationId'] = state.get('explorationId')
             if transition:
                 with self.store.transaction() as tx:
-                    conflict = next((row for row in tx.list('entries') if row.get('productId') == transition and row['entryId'] != entry['entryId'] and not row.get('detached')), None)
-                if conflict:
+                    conflicts = [row for row in tx.list('entries') if row.get('productId') == transition and row['entryId'] != entry['entryId'] and not row.get('detached')]
+                    child = tx.get('sources', conflicts[0].get('preferredSourceId')) if len(conflicts) == 1 else None
+                product = state['identities'].get(transition, {})
+                exploration = state['identities'].get(source.get('explorationId'), {})
+                from product_identity import get_identity
+                related = bool(entry['kind'] == 'exploration' and len(conflicts) == 1 and child
+                               and not conflicts[0].get('detached')
+                               and conflicts[0].get('kind') == 'product'
+                               and conflicts[0].get('explorationId') == source.get('explorationId')
+                               and not child.get('detached') and not child.get('runtimeId')
+                               and child.get('entryId') == conflicts[0]['entryId'] and child.get('kind') == 'product'
+                               and child.get('discoveredFromSourceId') == source_id and child.get('root') == source['root']
+                               and child.get('productId') == transition and child.get('explorationId') == source.get('explorationId')
+                               and child.get('project') == product.get('project')
+                               and product.get('kind') == 'product' and product.get('explorationId') == exploration.get('id')
+                               and state['paths'].get(product.get('project')) == transition
+                               and exploration.get('kind') == 'exploration' and exploration.get('id') == state.get('explorationId')
+                               and exploration.get('linkedProductId') == transition
+                               and any(row['identityId'] == exploration['id'] and transition in row.get('createdProductIds', [])
+                                       for row in state['cycles'].values())
+                               and (get_identity(reader.root, product['project'], create=False) or {}).get('id') == transition)
+                if conflicts and not related:
                     raise CenterError('SOURCE_CONFLICT', 'The new product identity is already registered.', 409)
-                source.update(kind='product', productId=transition, project=state['identities'][transition]['project'])
-                entry.update(kind='product', productId=transition)
-                reader = JournalSource(reader.root, scope=ProductScope('product', transition, source.get('explorationId'), source['project']))
+                if related:
+                    # Discovery already registered this exact child. Keep the
+                    # original managed exploration and refresh its own history.
+                    source['warnings'] = [warning for warning in source.get('warnings', []) if warning != 'SOURCE_CONFLICT']
+                else:
+                    source.update(kind='product', productId=transition, project=state['identities'][transition]['project'])
+                    entry.update(kind='product', productId=transition)
+                    reader = JournalSource(reader.root, scope=ProductScope('product', transition, source.get('explorationId'), source['project']))
             source['project'] = reader.scope.project
             identity = source.get('productId') or source.get('explorationId')
             if identity:
                 source['identityFingerprint'] = digest({'id': identity, 'kind': source['kind']})
                 source['cycleEvidence'] = {key: digest(value) for key, value in state['cycles'].items() if value['identityId'] == identity}
-            status = self.readonly_observer.status(reader) if not source.get('runtimeId') else None
-            observation = scoped_observation(reader, status)
-            # Only identity-bound active work may enter a scoped journal.
-            snapshot = reader.snapshot(status=status if observation and observation.get('currentCycleId') else None)
+            snapshot, observation = self._snapshot(source, reader)
             cycles = snapshot['cycles']
             latest = cycles[0] if cycles else {}
             latest_work = self._latest_work(snapshot['cycles'], source['kind'], latest)
@@ -404,7 +457,19 @@ class CenterCatalog:
         if entry.get('archived') or source.get('availability') != 'available':
             capabilities.update(execute=False, preview=False, capture=False)
         reason = 'ENTRY_ARCHIVED' if entry.get('archived') else 'SOURCE_UNAVAILABLE' if source.get('availability') != 'available' else 'READ_ONLY_SOURCE'
-        return {**entry, **projection, 'sourceId': source.get('sourceId'), 'runtimeId': source.get('runtimeId'),
+        direction = entry.get('direction') or ''
+        if not direction and entry['kind'] == 'exploration':
+            operation = next((row for row in tx.list('operations')
+                              if (row.get('result') or {}).get('entryId') == entry['entryId']), None)
+            direction = (operation or {}).get('input', {}).get('direction') or ''
+        direction_summary = ' '.join(direction.split())[:160]
+        short_id = entry['entryId'][-8:]
+        display_name = projection.get('displayName') or entry.get('displayName')
+        if entry['kind'] == 'exploration':
+            display_name = direction_summary or ('Exploration · ' + short_id)
+        return {**entry, **projection, 'displayName': display_name, 'direction': direction,
+                'directionSummary': direction_summary, 'shortId': short_id,
+                'sourceId': source.get('sourceId'), 'runtimeId': source.get('runtimeId'),
                 'sourceRevision': source.get('sourceRevision'), 'availability': source.get('availability', 'unknown'),
                 'capabilities': capabilities, 'capabilityReasons': {key: reason for key in ('execute', 'preview', 'capture') if not capabilities.get(key)}, 'executionSummary': {'state': 'unknown' if source.get('runtimeId') or source.get('availability') != 'available' else 'read_only', 'reason': 'read_only_source'},
                 'iconUrl': '/api/center/v1/entries/' + quote(entry['entryId']) + '/resources/' + quote(projection['iconResourceId']) + '?sourceId=' + quote(source['sourceId'])
@@ -438,7 +503,8 @@ class CenterCatalog:
         items = [row for row in items if (filter_value != 'active' or not row.get('archived') and row['kind'] in {'product', 'legacy'})
                  and (filter_value != 'archived' or row.get('archived'))
                  and (filter_value not in {'product', 'exploration', 'legacy', 'reference'} or row['kind'] == filter_value)
-                 and (not search or search in ((row.get('displayName') or '') + ' ' + (row.get('description') or '')).casefold())]
+                 and (not search or search in ' '.join(str(row.get(key) or '') for key in
+                      ('displayName', 'description', 'direction', 'shortId', 'createdAt', 'entryId', 'productId', 'explorationId')).casefold())]
         items.sort(key=lambda row: ((row.get('displayName') or '').casefold() if sort_value == 'name' else row.get('lastActivityAt') or '', row['entryId']), reverse=sort_value == 'activity')
         snapshot = digest([{key: value for key, value in row.items() if key != 'readonlyObservation'} for row in items])
         offset = 0
@@ -491,9 +557,7 @@ class CenterCatalog:
     def journal(self, entry_id, query=None):
         query = query or {}
         entry, source, reader = self.resolve_source(entry_id, query.get('sourceId'))
-        status = self.readonly_observer.status(reader) if not source.get('runtimeId') else None
-        observation = scoped_observation(reader, status)
-        data = reader.snapshot(status=status if observation and observation.get('currentCycleId') else None)
+        data, observation = self._snapshot(source, reader)
         data['readonlyObservation'] = observation
         exploration = query.get('section') == 'exploration'
         if entry['kind'] == 'product' and exploration:
@@ -597,7 +661,8 @@ class CenterCatalog:
         entry, source, reader = self.resolve_source(entry_id, source_id)
         if not isinstance(record_id, str) or not CYCLE_ID.fullmatch(record_id):
             raise CenterError('RECORD_NOT_FOUND', 'Record is unavailable.', 404)
-        row = next((row for row in reader.snapshot(detail_cycle_id=record_id)['cycles'] if row['id'] == record_id), None)
+        snapshot, _ = self._snapshot(source, reader, detail_cycle_id=record_id)
+        row = next((row for row in snapshot['cycles'] if row['id'] == record_id), None)
         if not row:
             raise CenterError('RECORD_NOT_FOUND', 'Record does not belong to this entry.', 404)
         self._journal_links(entry_id, source['sourceId'], [row], [])
@@ -616,6 +681,24 @@ class CenterCatalog:
         if resource_id.startswith('log-'):
             cycle_id = resource_id[4:]
             self.record(entry_id, cycle_id, source_id)
+            with self.store.transaction() as tx:
+                runtime = tx.get('runtimes', source.get('runtimeId')) if source.get('runtimeId') else None
+            domain_log = bool(source.get('runtimeId')) and not (runtime and runtime.get('managed') is False)
+            if domain_log:
+                if not callable(self.execution_query):
+                    raise CenterError('CONTEXT_UNAVAILABLE', 'Execution-domain log reader is unavailable.', 503)
+                result = self.execution_query(source, 'log', path='logs/' + cycle_id + '.log', offset=0, limit=1)
+                size = result.get('totalBytes', result.get('size'))
+                if result.get('ok') is not True or type(size) is not int or size < 0:
+                    raise CenterError('CONTEXT_UNAVAILABLE', 'Execution-domain log could not be verified.', 503)
+                offset = max(0, size - 128 * 1024)
+                result = self.execution_query(source, 'log', path='logs/' + cycle_id + '.log', offset=offset, limit=128 * 1024)
+                if result.get('ok') is not True or not isinstance(result.get('content'), str):
+                    raise CenterError('CONTEXT_UNAVAILABLE', 'Execution-domain log could not be read.', 503)
+                raw = result['content']
+                if offset:
+                    raw = raw.partition('\n')[2]
+                return raw.encode('utf-8'), 'text/plain; charset=utf-8'
             try:
                 raw, truncated = reader.read('logs/' + cycle_id + '.log', 128 * 1024, tail=True)
                 if truncated:

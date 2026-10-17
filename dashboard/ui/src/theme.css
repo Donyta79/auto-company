@@ -519,3 +519,21 @@ html::-webkit-scrollbar, body::-webkit-scrollbar, .project-info-body::-webkit-sc
 html[data-motion-resize] *, html[data-motion-resize] *::before, html[data-motion-resize] *::after { transition: none !important; }
 html[data-motion-hidden] *, html[data-motion-hidden] *::before, html[data-motion-hidden] *::after { transition: none !important; animation: none !important; }
 @media (prefers-reduced-motion: reduce) { .tab-selection, .search-field, .filter-selection { transition: none; } }
+
+/* Keep connection/import headings reachable while their content scrolls. */
+html[data-ui=shadcn] .ac-dialog:is([data-dialog-id=importDialog], [data-dialog-id=environmentDialog]) { overflow: hidden; }
+html[data-ui=shadcn] :is(#importForm, #environmentForm) { max-height: calc(100dvh - 40px); overflow-y: auto; }
+html[data-ui=shadcn] :is(#importForm, #environmentForm) .dialog-header { position: sticky; top: -24px; z-index: 2; background: var(--ui-background); padding-block: 12px; }
+.environment-body { display: grid; gap: 16px; }
+.environment-body > p { margin: 0; }
+.check-results { display: grid; gap: 8px; min-width: 0; }
+.check-results[hidden] { display: none; }
+.check-result { display: flex; align-items: flex-start; gap: 8px; overflow-wrap: anywhere; }
+.check-result > svg { width: 16px; height: 16px; margin-top: 3px; flex: 0 0 16px; }
+.check-result[data-state=failed] > svg { color: var(--ui-danger); }
+.check-result p { margin: 4px 0 0; font-size: var(--text-caption); }
+#workChecks { grid-column: 1 / -1; max-height: 160px; overflow-y: auto; }
+.recovery-review { border-top: 1px solid var(--ui-border); padding-top: 16px; display: grid; gap: 12px; }
+.recovery-review h3, .recovery-review p { margin: 0; }
+.raw-log { margin-top: 12px; }
+@media (max-width: 640px) { html[data-ui=shadcn] :is(#importForm, #environmentForm) .dialog-header { top: -16px; } }

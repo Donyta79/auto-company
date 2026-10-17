@@ -359,10 +359,70 @@ engine_adapter_description() {
     esac
 }
 
+ADAPTER_LOG_PID=""
+ADAPTER_LOG_CAPTURE=""
+ADAPTER_LOG_FAILED=0
+ADAPTER_OUTPUT_DIRECTORY=""
+
+adapter_log_start() {
+    local capture="$1" attempts=0 secret_name ready_pid=""
+    [ -n "${AUTONOMOUS_COMPANY_CYCLE_ID:-}" ] || return 0
+    ADAPTER_LOG_CAPTURE="$capture"
+    for secret_name in OPENAI_COMPATIBLE_API_KEY OPENAI_API_KEY CODEX_API_KEY ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CURSOR_API_KEY; do
+        export "$secret_name"
+    done
+    python3 "$ENGINE_ADAPTER_DIR/center_runner.py" stream-log --root "$PROJECT_DIR" \
+        --input-path "$capture" --relative-path "logs/${AUTONOMOUS_COMPANY_CYCLE_ID}.log" &
+    ADAPTER_LOG_PID=$!
+    while true; do
+        if [ -f "$capture.ready" ] && [ ! -L "$capture.ready" ]; then
+            IFS= read -r ready_pid < "$capture.ready" || true
+            [ "$ready_pid" != "$ADAPTER_LOG_PID" ] || return 0
+        fi
+        if ! kill -0 "$ADAPTER_LOG_PID" 2>/dev/null || [ "$attempts" -ge 100 ]; then
+            adapter_log_finish
+            return 1
+        fi
+        attempts=$((attempts + 1))
+        sleep 0.05
+    done
+}
+
+adapter_log_finish() {
+    if [ -n "$ADAPTER_LOG_CAPTURE" ]; then
+        if ! python3 "$ENGINE_ADAPTER_DIR/center_runner.py" stream-log-complete --input-path "$ADAPTER_LOG_CAPTURE"; then
+            ADAPTER_LOG_FAILED=1
+            [ -z "$ADAPTER_LOG_PID" ] || kill -TERM "$ADAPTER_LOG_PID" 2>/dev/null || true
+        fi
+    fi
+    if [ -n "$ADAPTER_LOG_PID" ]; then
+        wait "$ADAPTER_LOG_PID" 2>/dev/null || ADAPTER_LOG_FAILED=1
+    fi
+    if [ -n "$ADAPTER_LOG_CAPTURE" ]; then
+        rm -f "$ADAPTER_LOG_CAPTURE.complete" "$ADAPTER_LOG_CAPTURE.ready"
+    fi
+    ADAPTER_LOG_PID=""
+    ADAPTER_LOG_CAPTURE=""
+}
+
 adapter_execute() {
-    local output_file
-    output_file=$(mktemp)
+    local output_file output_directory
+    output_directory=$(mktemp -d "${TMPDIR:-/tmp}/auto-company-adapter.XXXXXXXX")
+    output_file=$(mktemp "$output_directory/capture.XXXXXXXX")
+    ADAPTER_OUTPUT_DIRECTORY="$output_directory"
     ADAPTER_OUTPUT_FILE="$output_file"
+    ADAPTER_LOG_FAILED=0
+    if ! adapter_log_start "$output_file"; then
+        ADAPTER_LOG_FAILED=1
+        ADAPTER_OUTPUT="Runtime log safety check failed before provider invocation"
+        ADAPTER_EXIT_CODE=78
+        ADAPTER_TIMED_OUT=0
+        rm -f "$output_file"
+        rmdir "$output_directory"
+        ADAPTER_OUTPUT_DIRECTORY=""
+        ADAPTER_OUTPUT_FILE=""
+        return
+    fi
 
     cycle_supervisor_run \
         "$CYCLE_TIMEOUT_SECONDS" \
@@ -374,9 +434,12 @@ adapter_execute() {
 
     ADAPTER_EXIT_CODE="$CYCLE_SUPERVISOR_EXIT_CODE"
     ADAPTER_TIMED_OUT="$CYCLE_SUPERVISOR_TIMED_OUT"
+    adapter_log_finish
 
     ADAPTER_OUTPUT=$(adapter_redact --structured < "$output_file")
     rm -f "$output_file"
+    rmdir "$output_directory"
+    ADAPTER_OUTPUT_DIRECTORY=""
     ADAPTER_OUTPUT_FILE=""
     if [ "$ADAPTER_TIMED_OUT" -eq 1 ]; then
         ADAPTER_EXIT_CODE=124

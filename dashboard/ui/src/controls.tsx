@@ -99,7 +99,10 @@ function installCheckbox(input: HTMLInputElement) {
     aria-label={label?.textContent?.trim()} onCheckedChange={value => {
       setChecked(input, value === true); update(); input.dispatchEvent(new Event("change", { bubbles: true }));
     }} />, () => dispose?.());
-  dispose = connectField(input, update);
+  const labelObserver = new MutationObserver(update);
+  if (label) labelObserver.observe(label, { childList: true, subtree: true, characterData: true });
+  const disconnect = connectField(input, update);
+  dispose = () => { disconnect(); labelObserver.disconnect(); };
   input.focus = options => host.querySelector("button")?.focus(options);
 }
 let serial = 0;

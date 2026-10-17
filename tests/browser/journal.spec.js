@@ -686,3 +686,25 @@ test("running elapsed freezes on disconnect and rejects older snapshots", async 
   await expect(page.locator("#cycleNumber")).toHaveText("03");
   await expect(page.locator("#connectionError")).toBeVisible();
 });
+
+
+test("earlier check evidence stays visible without replacing the latest failure", async ({ page, journal }) => {
+  const data = await (await page.request.get(`${journal.url}/api/journal`)).json();
+  const current = data.cycles[0];
+  const older = { id: 'older-check', state: 'completed', evidenceStatus: 'completed', available: true, freshness: 'fresh', reportStatus: 'fresh', exitCode: 0,
+    tests: { tests: 2, failures: 0, errors: 0, skipped: 0 }, recordedAt: current.startedAt, path: 'docs/old-check.xml' };
+  const latest = { ...older, id: 'latest-check', path: 'docs/latest-check.xml', exitCode: 1, tests: { tests: 2, failures: 1, errors: 0, skipped: 0 } };
+  current.latestCheck = latest; current.checks = [latest, older]; current.checkStatus = "completed";
+  await page.route('**/api/journal', route => route.fulfill({ json: { ...data, language: 'en', languageState: null } }));
+  await page.goto(`${journal.url}/journal`);
+  await expect(page.locator('#currentCycle .record-check')).toContainText('1 failed');
+  await expect(page.locator('#currentCycle .record-check-history')).toHaveCount(1);
+  await expect(page.locator('#currentCycle .record-check-history')).toContainText('2 passed');
+  await expect(page.locator('#currentCycle .record-check-history a')).toHaveAttribute('href', /old-check.xml/);
+  for (const state of ['running', 'interrupted', 'stale']) {
+    current.checkStatus = state; current.latestCheck = { ...latest, evidenceStatus: state, state };
+    await refreshRecords(page);
+    await expect(page.locator('#currentCycle .record-check-history')).toContainText('2 passed');
+    await expect(page.locator('#currentCycle .record-check-history')).toHaveAttribute('data-status', 'completed');
+  }
+});

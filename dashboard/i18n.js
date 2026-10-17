@@ -1,6 +1,12 @@
 /* The journal follows the shared preference and the current product language lock. */
 window.JOURNAL_MESSAGES = {
   "zh-CN": {
+    "earlierCheck": "较早检查",
+    "objectMissing": "此项目不存在或已被移除。请返回中心选择其他项目。",
+    "logFilesChanged": "文件变更",
+    "logCollaboration": "协作",
+    "rawLog": "原始记录",
+
     "logExitCode": "退出码", "logRunStarted": "开始执行", "logRunCompleted": "本次调用完成", "logError": "错误",
     "runtimeUnmanaged": "此档案没有已确认的受管运行状态。",
     "runtimeNoEvidence": "缺少足够的当前运行证据，请重试读取或查看诊断。",
@@ -388,6 +394,12 @@ window.JOURNAL_MESSAGES = {
     "previewName": "产品预览"
   },
   "en": {
+    "earlierCheck": "Earlier check",
+    "objectMissing": "This project does not exist or has been removed. Return to the center to choose another project.",
+    "logFilesChanged": "File changes",
+    "logCollaboration": "Collaboration",
+    "rawLog": "Raw records",
+
     "logExitCode": "Exit code", "logRunStarted": "Run started", "logRunCompleted": "Call completed", "logError": "Error",
     "runtimeUnmanaged": "This archive has no confirmed managed runtime status.",
     "runtimeNoEvidence": "Current runtime evidence is insufficient. Retry reading or check diagnostics.",

@@ -114,6 +114,151 @@ class CenterCatalogTests(unittest.TestCase):
         self.assertEqual(content.decode('utf-8').splitlines(), final.splitlines())
         self.assertEqual(mime, 'text/plain; charset=utf-8')
 
+    def test_managed_log_uses_authorized_domain_and_never_falls_back(self):
+        row = self.cycle()
+        item, = self.import_root()
+        with self.store.transaction() as tx:
+            source = tx.get('sources', item['sourceId'])
+            source['runtimeId'] = 'runtime-test'
+            tx.put('sources', source['sourceId'], source)
+            tx.put('runtimes', 'runtime-test', {'managed': True})
+        calls = []
+        def query(source, action, **kwargs):
+            calls.append((source['sourceId'], action, kwargs))
+            return {'ok': True, 'content': '域内日志\n', 'totalBytes': 13}
+        self.catalog.execution_query = query
+        content, _ = self.catalog.resource(item['entryId'], 'log-' + row['cycleId'])
+        self.assertEqual(content.decode('utf-8'), '域内日志\n')
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][2]['path'], 'logs/' + row['cycleId'] + '.log')
+        self.assertEqual(calls[1][2]['limit'], 128 * 1024)
+        self.catalog.execution_query = lambda *args, **kwargs: {'ok': False}
+        with self.assertRaises(CenterError) as raised:
+            self.catalog.resource(item['entryId'], 'log-' + row['cycleId'])
+        self.assertEqual(raised.exception.code, 'CONTEXT_UNAVAILABLE')
+        with self.assertRaises(CenterError):
+            self.catalog.resource(item['entryId'], 'log-cycle-unrelated')
+        with self.store.transaction() as tx:
+            tx.put('runtimes', 'runtime-test', {'managed': False})
+        content, _ = self.catalog.resource(item['entryId'], 'log-' + row['cycleId'])
+        self.assertEqual(content.decode('utf-8'), 'projects/one private log')
+
+    def test_import_candidate_invalidated_by_environment_or_mapping_change(self):
+        self.cycle()
+        binding = {'root': str(self.root), 'executionRoot': '/custom/run',
+                   'executionDomain': {'platform': 'wsl', 'distribution': 'Chosen', 'user': 'operator'}, 'environmentRevision': 1}
+        self.catalog.path_resolver = lambda value: dict(binding)
+        candidate = self.catalog.probe({'root': '/custom/run'})
+        body = {'candidateId': candidate['candidateId'], 'candidateHash': candidate['candidateHash']}
+        for change in ({'environmentRevision': 2}, {'executionRoot': '/changed/run'},
+                       {'executionDomain': {'platform': 'wsl', 'distribution': 'Other', 'user': 'operator'}}):
+            with self.subTest(change=change):
+                self.catalog.path_resolver = lambda value: {**binding, **change}
+                with self.assertRaises(CenterError) as raised:
+                    self.catalog.commit(body)
+                self.assertEqual(raised.exception.code, 'SOURCE_CHANGED')
+        self.catalog.path_resolver = lambda value: dict(binding)
+        self.assertEqual(len(self.catalog.commit(body)['items']), 1)
+
+    def test_exploration_direction_date_and_short_identity_are_searchable(self):
+        self.cycle(project=None)
+        item, = self.import_root()
+        with self.store.transaction() as tx:
+            entry = tx.get('entries', item['entryId'])
+            entry.update(direction='  Local\n invoice tracking  ', createdAt='2026-10-18T00:00:00Z')
+            tx.put('entries', entry['entryId'], entry)
+        result = self.catalog.get_entry(item['entryId'])
+        self.assertEqual(result['displayName'], 'Local invoice tracking')
+        self.assertEqual(result['directionSummary'], 'Local invoice tracking')
+        for query in ('invoice', '2026-10-18', result['shortId']):
+            self.assertEqual(self.catalog.list_entries({'filter': 'all', 'q': query})['total'], 1)
+        with self.store.transaction() as tx:
+            entry.pop('direction')
+            tx.put('entries', entry['entryId'], entry)
+            tx.put('operations', 'original', {'result': {'entryId': entry['entryId']},
+                                            'input': {'direction': 'Original direction'}})
+        self.assertEqual(self.catalog.get_entry(item['entryId'])['directionSummary'], 'Original direction')
+
+    def test_managed_snapshot_uses_domain_configuration_only_for_matching_identity(self):
+        cycle = self.cycle()
+        item, = self.import_root()
+        with self.store.transaction() as tx:
+            source = tx.get('sources', item['sourceId'])
+            source['runtimeId'] = 'runtime-test'
+            tx.put('sources', source['sourceId'], source)
+            tx.put('runtimes', 'runtime-test', {'managed': True})
+        status = {'ok': True, 'timestamp': '2026-10-18T00:00:00Z', 'executionDomain': {'platform': 'posix'},
+                  'stateFile': {'PRODUCT_ID': cycle['productId']},
+                  'parsed': {'loop': {'state': 'idle', 'processState': 'running', 'pid': 123}}}
+        self.catalog.managed_observer = lambda row: {'managed': True, 'status': status,
+                                                    'config': {'effort': 'xhigh', 'productLanguage': 'zh-CN'}}
+        result = self.catalog.journal(item['entryId'])
+        self.assertEqual(result['runtime']['reasoning'], 'xhigh')
+        self.assertEqual(result['runtime']['state'], 'idle')
+        self.assertFalse(result['readOnly'])
+        status['stateFile']['PRODUCT_ID'] = 'foreign'
+        result = self.catalog.journal(item['entryId'])
+        self.assertEqual(result['runtime']['reasoning'], 'unknown')
+        self.assertEqual(result['runtime']['state'], 'unknown')
+        self.catalog.managed_observer = lambda row: {}
+        result = self.catalog.journal(item['entryId'])
+        self.assertTrue(result['readOnly'])
+        self.assertEqual(result['runtime']['state'], 'unknown')
+
+    def test_released_source_with_runtime_id_keeps_readonly_refresh_journal_and_log(self):
+        from center_runtime import CenterRuntime
+        cycle = self.cycle()
+        item, = self.import_root()
+        with self.store.transaction() as tx:
+            source = tx.get('sources', item['sourceId'])
+            source['runtimeId'] = 'released-runtime'
+            tx.put('sources', source['sourceId'], source)
+            tx.put('runtimes', 'released-runtime', {'managed': True})
+        self.catalog.managed_observer = lambda row: {}
+        self.assertEqual(self.catalog.refresh_source(item['sourceId'])['availability'], 'available')
+        with self.store.transaction() as tx:
+            runtime = tx.get('runtimes', 'released-runtime')
+            runtime['managed'] = False
+            tx.put('runtimes', 'released-runtime', runtime)
+        runtime = CenterRuntime.__new__(CenterRuntime)
+        runtime.store = self.store
+        runtime.domain = {'platform': 'posix'}
+        self.catalog.managed_observer = runtime.observe_source
+        self.catalog.execution_query = runtime.execution_query
+        before = self.hashes()
+        status = {'ok': True, 'timestamp': '2026-10-18T00:00:00Z', 'executionDomain': {'platform': 'posix'},
+                  'stateFile': {}, 'parsed': {'loop': {'state': 'stopped', 'processState': 'stopped', 'pid': None}}}
+        with patch.object(self.catalog.readonly_observer, 'status', return_value=status) as observed:
+            refreshed = self.catalog.refresh_source(item['sourceId'])
+            self.assertEqual(refreshed['availability'], 'available')
+            self.assertEqual(refreshed['runtimeId'], 'released-runtime')
+            journal = self.catalog.journal(item['entryId'])
+            self.assertTrue(journal['readOnly'])
+            self.assertEqual(journal['readonlyObservation']['state'], 'ended')
+            content, _ = self.catalog.resource(item['entryId'], 'log-' + cycle['cycleId'])
+            self.assertEqual(content.decode('utf-8'), 'projects/one private log')
+            self.assertEqual(observed.call_count, 3)
+        self.assertEqual(self.hashes(), before)
+
+    def test_managed_observation_failure_never_uses_readonly_host_observation(self):
+        from center_runtime import CenterRuntime
+        self.cycle()
+        item, = self.import_root()
+        with self.store.transaction() as tx:
+            source = tx.get('sources', item['sourceId'])
+            source['runtimeId'] = 'managed-runtime'
+            tx.put('sources', source['sourceId'], source)
+            tx.put('runtimes', 'managed-runtime', {'managed': True, 'executionDomain': {'platform': 'foreign'}})
+        runtime = CenterRuntime.__new__(CenterRuntime)
+        runtime.store = self.store
+        runtime.domain = {'platform': 'posix'}
+        self.catalog.managed_observer = runtime.observe_source
+        with patch.object(self.catalog.readonly_observer, 'status', side_effect=AssertionError('host fallback')):
+            with self.assertRaises(CenterError) as raised:
+                self.catalog.journal(item['entryId'])
+            self.assertEqual(raised.exception.code, 'READ_ONLY_SOURCE')
+            self.assertEqual(self.catalog.refresh_source(item['sourceId'])['availability'], 'conflict')
+
     def test_observation_freshness_does_not_change_source_revision_or_catalog_cursor(self):
         self.cycle()
         self.cycle('projects/two', 'second')
@@ -391,6 +536,128 @@ class CenterCatalogTests(unittest.TestCase):
         exploration = self.catalog.list_entries({'filter': 'exploration'})['items'][0]
         self.assertEqual(exploration['availability'], 'available')
         self.assertEqual(self.catalog.journal(exploration['entryId'])['cycles'][0]['projectStatus'], 'current')
+
+    def managed_discovery(self, completed_before_discovery=False):
+        entry = {'entryId': 'entry-managed', 'kind': 'exploration', 'productId': None, 'explorationId': None,
+                 'preferredSourceId': 'source-managed', 'revision': 1, 'archived': False, 'detached': False}
+        source = {'sourceId': 'source-managed', 'entryId': entry['entryId'], 'runtimeId': 'runtime-managed', 'root': str(self.root),
+                  'kind': 'exploration', 'productId': None, 'explorationId': None, 'revision': 1, 'sourceRevision': 1}
+        with self.store.transaction() as tx:
+            tx.put('entries', entry['entryId'], entry)
+            tx.put('sources', source['sourceId'], source)
+        row = products.reserve_cycle(self.root, '', 'discovery-first', 1, 'fixture', 'no-model')
+        products.update_cycle(self.root, row['cycleId'], 'dispatching')
+        anchor = self.catalog.refresh_source(source['sourceId'])
+        self.write('projects/created/README.md', '# Created product\n')
+        self.write('projects/registry.tsv', 'name\tpath\tlifecycle\tcreated_at_utc\ncreated\tprojects/created\tlocal\t2026-10-06\n')
+        product = products.register_project(self.root, 'projects/created', row['cycleId'])
+        if completed_before_discovery:
+            products.update_cycle(self.root, row['cycleId'], 'completed')
+        child_id, = self.catalog._discover_products(anchor)
+        with self.store.transaction() as tx:
+            child = tx.get('sources', child_id)
+        return source['sourceId'], child, row, product
+
+    def test_managed_exploration_refreshes_completed_cycle_beside_exact_discovered_product(self):
+        anchor_id, child, row, product = self.managed_discovery()
+        old = self.catalog.get_entry('entry-managed')
+        self.assertEqual(old['latestCycleStatus'], 'startup_unconfirmed')
+        with self.store.transaction() as tx:
+            tx.put('sources', child['sourceId'], {**child, 'discoveredFromSourceId': 'source-unrelated'})
+        self.assertEqual(self.catalog.refresh_source(anchor_id)['availability'], 'conflict')
+        products.update_cycle(self.root, row['cycleId'], 'completed')
+        self.assertEqual(self.catalog.journal('entry-managed')['cycles'][0]['status'], 'completed')
+        self.assertEqual(self.catalog.get_entry('entry-managed')['latestCycleStatus'], 'startup_unconfirmed')
+        with self.store.transaction() as tx:
+            tx.put('sources', child['sourceId'], child)
+        before = self.hashes()
+        self.catalog.refresh_source(anchor_id)
+        self.catalog.refresh_source(child['sourceId'])
+        exploration = self.catalog.get_entry('entry-managed')
+        discovered = self.catalog.get_entry(child['entryId'])
+        self.assertEqual(exploration['kind'], 'exploration')
+        self.assertIsNone(exploration['productId'])
+        self.assertEqual(exploration['explorationId'], row['explorationId'])
+        self.assertEqual(exploration['runtimeId'], 'runtime-managed')
+        self.assertEqual(exploration['sourceId'], anchor_id)
+        self.assertEqual(exploration['availability'], 'available')
+        self.assertNotIn('SOURCE_CONFLICT', exploration['warnings'])
+        self.assertEqual(exploration['latestCycleStatus'], 'completed')
+        self.assertEqual(exploration['cycleNumber'], 1)
+        self.assertEqual(discovered['productId'], product['id'])
+        self.assertEqual(discovered['latestCycleStatus'], 'completed')
+        self.assertIsNone(discovered['runtimeId'])
+        self.assertFalse(discovered['capabilities']['execute'])
+        self.assertEqual(self.catalog.list_entries({'filter': 'all'})['total'], 2)
+        self.assertEqual(self.hashes(), before)
+
+    def test_completed_before_discovery_keeps_both_original_scopes(self):
+        anchor_id, child, row, product = self.managed_discovery(completed_before_discovery=True)
+        before = self.hashes()
+        self.assertEqual(self.catalog.refresh_source(anchor_id)['availability'], 'available')
+        self.catalog.refresh_source(child['sourceId'])
+        exploration = self.catalog.get_entry('entry-managed')
+        self.assertEqual(exploration['kind'], 'exploration')
+        self.assertEqual(exploration['latestCycleStatus'], 'completed')
+        self.assertEqual(self.catalog.get_entry(child['entryId'])['productId'], product['id'])
+        self.assertEqual(self.hashes(), before)
+
+    def test_unrelated_discovery_and_duplicate_or_tombstoned_products_stay_conflicted(self):
+        anchor_id, child, row, product = self.managed_discovery()
+        before = self.hashes()
+        with self.store.transaction() as tx:
+            entry = tx.get('entries', child['entryId'])
+        for change in ({'root': str(self.base / 'foreign-root')}, {'project': 'projects/foreign'},
+                       {'explorationId': 'f' * 32}, {'discoveredFromSourceId': 'source-foreign'},
+                       {'productId': 'f' * 32}, {'runtimeId': 'runtime-foreign'}, {'detached': True}):
+            with self.subTest(change=change):
+                with self.store.transaction() as tx:
+                    tx.put('sources', child['sourceId'], {**child, **change})
+                self.assertEqual(self.catalog.refresh_source(anchor_id)['availability'], 'conflict')
+        with self.store.transaction() as tx:
+            tx.put('sources', child['sourceId'], child)
+        for change in ({'explorationId': 'f' * 32},):
+            with self.subTest(entry_change=change):
+                with self.store.transaction() as tx:
+                    tx.put('entries', entry['entryId'], {**entry, **change})
+                self.assertEqual(self.catalog.refresh_source(anchor_id)['availability'], 'conflict')
+        with self.store.transaction() as tx:
+            tx.put('entries', entry['entryId'], entry)
+            tx.put('entries', 'duplicate-product', {**entry, 'entryId': 'duplicate-product'})
+        self.assertEqual(self.catalog.refresh_source(anchor_id)['availability'], 'conflict')
+        self.assertEqual(self.catalog.get_entry('entry-managed')['kind'], 'exploration')
+        self.assertEqual(self.hashes(), before)
+
+    def test_detached_discovery_remains_inactive_and_preserves_existing_promotion(self):
+        anchor_id, child, row, product = self.managed_discovery()
+        with self.store.transaction() as tx:
+            detached = {**tx.get('entries', child['entryId']), 'detached': True}
+            detached_source = {**child, 'detached': True}
+            tx.put('entries', child['entryId'], detached)
+            tx.put('sources', child['sourceId'], detached_source)
+        before = self.hashes()
+        self.assertEqual(self.catalog.refresh_source(anchor_id)['availability'], 'available')
+        managed = self.catalog.get_entry('entry-managed')
+        self.assertEqual(managed['kind'], 'product')
+        self.assertEqual(managed['productId'], product['id'])
+        self.assertEqual(managed['runtimeId'], 'runtime-managed')
+        self.assertEqual(self.catalog.list_entries({'filter': 'all'})['total'], 1)
+        with self.assertRaises(CenterError) as context:
+            self.catalog.get_entry(child['entryId'])
+        self.assertEqual(context.exception.code, 'ENTRY_NOT_FOUND')
+        with self.store.transaction() as tx:
+            self.assertEqual(tx.get('entries', child['entryId']), detached)
+            self.assertEqual(tx.get('sources', child['sourceId']), detached_source)
+        self.assertEqual(self.hashes(), before)
+
+    def test_discovered_product_without_original_ledger_link_stays_conflicted(self):
+        anchor_id, child, row, product = self.managed_discovery()
+        with products.transaction(self.root) as state:
+            state['cycles'][row['cycleId']].pop('createdProductIds')
+        before = self.hashes()
+        self.assertEqual(self.catalog.refresh_source(anchor_id)['availability'], 'conflict')
+        self.assertEqual(self.catalog.get_entry('entry-managed')['kind'], 'exploration')
+        self.assertEqual(self.hashes(), before)
 
     def test_cycle_cursor_bound_to_history_snapshot(self):
         self.cycle(attempt='first')

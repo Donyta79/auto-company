@@ -68,3 +68,10 @@ def remember(tx, config):
     if preferences.get("lastConfig") != value:
         preferences.update(lastConfig=value, revision=preferences["revision"] + 1)
         tx.put("preferences", "main", preferences)
+
+
+def validate_template_name(tx, name, template_id=None):
+    normalized = ' '.join(name.split()).casefold()
+    if any(row.get('templateId') != template_id and ' '.join(row.get('name', '').split()).casefold() == normalized
+           for row in tx.list('templates')):
+        raise CenterError('TEMPLATE_NAME_CONFLICT', 'A template with this name already exists; use a distinct name.', 409)

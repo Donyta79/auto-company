@@ -19,20 +19,25 @@ import sys
 import tempfile
 
 from project_isolation import IsolationError, checked_tree, run_isolated, runtime_binary
-from product_identity import empty_state, read_state, transaction, validate_state, safe_path
+from product_identity import empty_state, read_state, transaction, validate_state, safe_path, transaction_signals, transaction_signal_mask
 
 HERE = Path(__file__).resolve().parent
 TEMPLATES = json.loads((HERE / "isolation-runtime-files.json").read_text(encoding="utf-8-sig"))
 
 
-def regular_bytes(path):
+def regular_bytes(path, limit=None):
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise IsolationError("Only private regular files may cross the isolation boundary")
+        if limit is not None and info.st_size > limit:
+            raise ValueError("Isolated output exceeds its size limit")
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
-            return stream.read()
+            data = stream.read() if limit is None else stream.read(limit + 1)
+        if limit is not None and len(data) > limit:
+            raise ValueError("Isolated output exceeds its size limit")
+        return data
     finally:
         os.close(descriptor)
 
@@ -332,6 +337,7 @@ class CompanyView:
             "projects", "memories", "docs", "logs", ".autonomous-company", ".autonomous-company.local", ".git", ".gitignore", "prompt.txt"}
         uncollected = sorted(path.name for path in self.workspace.iterdir() if path.name not in expected_roots)
         self.retain_view = bool(uncollected)
+        rejected_reports = []
         incoming = read_state(self.workspace)
         additions = {key: value for key, value in incoming["identities"].items() if key not in self.initial["identities"]}
         if len(additions) > 1 or (self.project and additions):
@@ -408,16 +414,42 @@ class CompanyView:
         docs = self.store / "docs"
         copy_tree(self.workspace / "docs", ready / "docs")
         replacements.append((ready / "docs", docs))
-        # Artifact JSON is data, never a command passed back to a host shell.
+        # Reports and artifact JSON are data, never host shell commands.
         for folder, _, files in os.walk(self.workspace / "logs"):
             for name in files:
                 source = Path(folder) / name
                 relative = source.relative_to(self.workspace)
+                work_report = bool(self.cycle) and source.parent == self.workspace / "logs" and name == self.cycle + ".work.json"
                 permitted = ((source.parent == self.workspace / "logs" and name == self.cycle + ".events.jsonl")
+                             or work_report
                              or (source.parent == self.workspace / "logs/artifacts" and re.fullmatch(r"[0-9a-f]{32}\.json", name)))
                 if not permitted:
                     continue
-                data = regular_bytes(source)
+                if work_report:
+                    from cycle_reports import LIMIT, decode
+                    source = safe_path(self.workspace, relative)
+                    try:
+                        data = regular_bytes(source, LIMIT)
+                        report = decode(data.decode("utf-8"), self.cycle)
+                        row = self.initial["cycles"].get(self.cycle)
+                        owner = self.initial["identities"].get(row["identityId"]) if row else None
+                        if (not row or not owner or row["cycleId"] != self.cycle
+                                or row["identityId"] != self.scope
+                                or report["project"] != row["project"] or row["project"] != self.project
+                                or owner["project"] != self.project
+                                or (self.project and (owner["kind"] != "product"
+                                    or self.initial["paths"].get(self.project) != owner["id"]))
+                                or (not self.project and (owner["kind"] != "exploration"
+                                    or self.initial["explorationId"] != owner["id"]))):
+                            raise ValueError("Work report identity does not match the isolated cycle")
+                    except IsolationError:
+                        raise
+                    except (UnicodeError, ValueError, TypeError, KeyError, RecursionError, OverflowError) as error:
+                        rejected_reports.append({"path": relative.as_posix(), "reason": str(error)[:300]})
+                        self.retain_view = True
+                        continue
+                else:
+                    data = regular_bytes(source)
                 if source.parent.name == "artifacts":
                     record = json.loads(data)
                     if record.get("cycleId") != self.cycle or record.get("project") not in projects:
@@ -433,6 +465,10 @@ class CompanyView:
                         data = (json.dumps(record, ensure_ascii=False) + "\n").encode()
                 target = safe_path(self.root, relative)
                 if target.exists():
+                    if work_report:
+                        rejected_reports.append({"path": relative.as_posix(), "reason": "Existing host observation cannot be overwritten"})
+                        self.retain_view = True
+                        continue
                     raise IsolationError("An isolated cycle cannot overwrite existing observations")
                 staged = ready / relative
                 staged.parent.mkdir(parents=True, exist_ok=True)
@@ -444,18 +480,25 @@ class CompanyView:
             replacements.append((ready / "sessions", session_target))
         write_json(ready / "last-run.json", {"backend": "bubblewrap", "scope": self.scope,
                    "cycle": self.cycle, "workspace": str(self.folder), "collected": True,
-                   "project": self.project, "sessions": str(session_target), "uncollectedRootOutputs": uncollected})
+                   "project": self.project, "sessions": str(session_target), "uncollectedRootOutputs": uncollected,
+                   "uncollectedWorkReports": rejected_reports})
         write_json(ready / "product-state.json", state)
         replacements += [(ready / "last-run.json", self.store / "last-run.json"),
                          (ready / "product-state.json", self.root / ".autonomous-company/product-state.json")]
         lock = safe_path(self.root, ".autonomous-company/product-state.lock")
-        lock.mkdir()
-        try:
-            if read_state(self.root) != self.state:
-                raise IsolationError("Host identity changed during isolated execution")
-            collect_transaction(self.root, ready, replacements)
-        finally:
-            lock.rmdir()
+        with transaction_signals():
+            acquired = False
+            try:
+                with transaction_signal_mask():
+                    lock.mkdir()
+                    acquired = True
+                if read_state(self.root) != self.state:
+                    raise IsolationError("Host identity changed during isolated execution")
+                collect_transaction(self.root, ready, replacements)
+            finally:
+                if acquired:
+                    with transaction_signal_mask():
+                        lock.rmdir()
         self.collected = True
 
 

@@ -477,6 +477,18 @@ class JournalSource:
                     or any(not state.get(key) or pending.get(key.lower()) != state[key]
                            for key in ("ENGINE", "MODEL"))):
                 return None
+            identity_cycles = self.identity_state()["cycles"]
+            reservation = identity_cycles.get(identity)
+            if reservation:
+                # Loop bootstrap writes usage.pending before dispatch. Only the
+                # program-owned dispatch timestamp establishes live execution.
+                if reservation["state"] != "dispatching":
+                    return None
+                started = timestamp(reservation.get("dispatchAt"))
+                if not started:
+                    return None
+            elif identity_cycles or (self.scope and self.scope.kind not in {"legacy", "reference"}):
+                return None
             # A previous launch's unfinished reservation is not the new loop's
             # active work, even when its cycle number happens to be the same.
             pid_time = self.safe_path(".auto-loop.pid").stat().st_mtime_ns
@@ -506,10 +518,15 @@ class JournalSource:
         allowed = {record["cycle_id"] for record in records}
         if active:
             allowed.add(active["id"])
+        scoped = self.scoped_cycle_ids()
+        if scoped is not None:
+            allowed &= scoped
         if identity not in allowed:
             raise ValueError("Unknown cycle identity")
         try:
             text, truncated = self.read(f"logs/{identity}.log", MAX_LOG_BYTES, tail=True)
+            if truncated:
+                text = text.partition('\n')[2]
             return {"ok": True, "text": text, "available": True, "truncated": truncated}
         except (OSError, ValueError):
             return {"ok": True, "text": "", "available": False, "truncated": False}
@@ -523,7 +540,8 @@ class JournalSource:
 
     def snapshot(self, *, status: dict[str, Any] | None = None,
                  language_state: dict[str, Any] | None = None,
-                 detail_cycle_id: str | None = None) -> dict[str, Any]:
+                 detail_cycle_id: str | None = None,
+                 runtime_config: dict[str, Any] | None = None) -> dict[str, Any]:
         generated = datetime.now(timezone.utc)
         generated_at = generated.isoformat()
         records, warnings = self.ledger()
@@ -625,8 +643,17 @@ class JournalSource:
             # ownership for a selected historical identity.
             raw, updated_at, parts, progress_lines = "", None, {}, []
             warnings.append("unscoped_consensus_omitted")
-            runtime.update(state="unknown", processState="unknown", available=False,
-                           engine="unknown", model="unknown", reasoning="unknown")
+            allowed = self.scoped_cycle_ids() or set()
+            scoped_active = runtime.get('currentCycleId') in allowed
+            scoped_product = (self.scope.product_id and status and status.get('ok') is True
+                              and status.get('stateFile', {}).get('PRODUCT_ID') == self.scope.product_id)
+            if not (scoped_active or scoped_product):
+                runtime.update(state="unknown", processState="unknown", available=False,
+                               engine="unknown", model="unknown", reasoning="unknown")
+            elif runtime_config:
+                runtime.update(reasoning=runtime_config.get('effort') or 'unknown',
+                               language=runtime_config.get('productLanguage') or runtime_config.get('lang') or runtime_config.get('language') or 'unknown',
+                               configSource='execution_domain')
         if runtime["currentCycleId"]:
             current = next((cycle for cycle in cycles if cycle["id"] == runtime["currentCycleId"]), None)
             if current:

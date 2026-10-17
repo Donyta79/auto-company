@@ -72,6 +72,15 @@ class FakeAdapter:
     def query(self, action, **kwargs):
         if action == "preflight":
             return self.preflight
+        if action == "query" and kwargs.get("query") == "capabilities":
+            # Model the execution-domain capability reply while retaining the
+            # real fixture files used to test compatibility and governance.
+            sys.path.insert(0, str(ROOT / "scripts/core"))
+            from center_runner import compatible, execution_context, governance_reason, protective_reason
+            root = Path(kwargs["root"])
+            return {"ok": True, "marker": json.loads((root / ".autonomous-company-center.json").read_text()),
+                    "context": execution_context(root, kwargs.get("expected_product_id")), "compatible": compatible(root),
+                    "protectiveReason": protective_reason(root), "governanceReason": governance_reason(root)}
         return {"slotFree": self.slot_free, "ownerAlive": self.owner_alive, "owner": self.receipt,
                 "receipt": self.receipt if kwargs.get("manifest") else None}
 
@@ -940,7 +949,8 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(len(listed), 1)
         self.assertEqual((listed[0]["operationId"], listed[0]["state"], listed[0]["reason"]),
                          (initial["operationId"], "failed", "FRAMEWORK_UNVERIFIED"))
-        self.assertEqual(set(listed[0]), {"operationId", "kind", "state", "createdAt", "endedAt", "revision", "reason", "reserved", "result"})
+        self.assertEqual(set(listed[0]), {"operationId", "kind", "state", "createdAt", "endedAt", "revision", "reason", "reserved", "result",
+                                        "batchId", "archived", "canRetry", "canCancel"})
         self.assertEqual(self.runtime.list_operations({"state": "preparing"}), {"items": []})
         self.assertEqual(self.runtime.summary()["attentionCount"], 1)
         self.assertEqual(self.store.revision, revision)

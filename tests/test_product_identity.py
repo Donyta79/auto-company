@@ -1,6 +1,8 @@
 """Persistent numbering and explicit source registration, without model calls."""
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
+import signal
 from pathlib import Path
 import shutil
 import subprocess
@@ -322,6 +324,98 @@ p.reserve_cycle(Path(sys.argv[2]), 'projects/alpha', 'crashed-writer', 1)
         following = self.reserve("after-crashed-writer")
         self.assertEqual(following["productId"], identity["id"])
         self.assertEqual(following["productCycleNumber"], 2)
+
+    @unittest.skipUnless(os.name == "posix", "Requires real POSIX SIGTERM")
+    def test_sigterm_unwinds_live_transaction_and_releases_original_lock(self):
+        code = """
+import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import product_identity as p
+with p.transaction(Path(sys.argv[2])):
+    print('locked', flush=True)
+    time.sleep(60)
+"""
+        process = subprocess.Popen([sys.executable, "-c", code, str(ROOT / "scripts/core"), str(self.root)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: process.kill() if process.poll() is None else None)
+        self.assertEqual(process.stdout.readline().strip(), "locked")
+        self.assertTrue((self.root / ".autonomous-company/product-state.lock").is_dir())
+        process.send_signal(signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=4)
+        self.assertEqual(process.returncode, 143, stderr)
+        self.assertFalse((self.root / ".autonomous-company/product-state.lock").exists())
+        self.assertFalse((self.root / ".autonomous-company/product-state.json").exists())
+        self.assertEqual(self.reserve("after-term")["productCycleNumber"], 1)
+
+    @unittest.skipUnless(os.name == "posix", "Requires real POSIX SIGTERM")
+    def test_sigterm_keeps_staged_intent_and_recovery_never_reuses_number(self):
+        code = """
+import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import product_identity as p
+original = p.atomic_write
+def stage(path, data):
+    if path.name == 'product-state.json':
+        print('staged', flush=True)
+        time.sleep(60)
+    return original(path, data)
+p.atomic_write = stage
+p.reserve_cycle(Path(sys.argv[2]), 'projects/alpha', 'terminated-writer', 1)
+"""
+        process = subprocess.Popen([sys.executable, "-c", code, str(ROOT / "scripts/core"), str(self.root)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: process.kill() if process.poll() is None else None)
+        self.assertEqual(process.stdout.readline().strip(), "staged")
+        process.send_signal(signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=4)
+        self.assertEqual(process.returncode, 143, stderr)
+        self.assertFalse((self.root / ".autonomous-company/product-state.lock").exists())
+        self.assertTrue((self.root / ".autonomous-company/product-state.transaction.json").exists())
+        recovered = products.recover_cycles(self.root)
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(recovered[0]["state"], "not_started")
+        self.assertFalse((self.root / ".autonomous-company/product-state.transaction.json").exists())
+        self.assertEqual(self.reserve("after-term")["productCycleNumber"], 2)
+
+    @unittest.skipUnless(os.name == "posix", "Requires real POSIX SIGKILL")
+    def test_sigkill_keeps_lock_and_requires_original_stopped_confirmation(self):
+        code = """
+import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import product_identity as p
+with p.transaction(Path(sys.argv[2])):
+    print('locked', flush=True)
+    time.sleep(60)
+"""
+        process = subprocess.Popen([sys.executable, "-c", code, str(ROOT / "scripts/core"), str(self.root)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: process.kill() if process.poll() is None else None)
+        self.assertEqual(process.stdout.readline().strip(), "locked")
+        process.kill()
+        process.communicate(timeout=4)
+        self.assertEqual(process.returncode, -signal.SIGKILL)
+        lock = self.root / ".autonomous-company/product-state.lock"
+        self.assertTrue(lock.is_dir())
+        with self.assertRaises(ValueError):
+            with products.transaction(self.root, timeout=0.03):
+                pass
+        command = [sys.executable, str(ROOT / "scripts/core/product_identity.py"),
+                   "--root", str(self.root), "recover-lock", "--confirm"]
+        denied = subprocess.run([*command, "NOT_STOPPED"], capture_output=True, text=True)
+        self.assertEqual(denied.returncode, 1)
+        self.assertTrue(lock.is_dir())
+        denied = subprocess.run([*command, "STOPPED"], env={**os.environ, "AUTONOMOUS_COMPANY_CYCLE": "1"},
+                                capture_output=True, text=True)
+        self.assertEqual(denied.returncode, 1)
+        self.assertTrue(lock.is_dir())
+        stopped = subprocess.run([*command, "STOPPED"],
+                                 env={key: value for key, value in os.environ.items() if key != "AUTONOMOUS_COMPANY_CYCLE"},
+                                 capture_output=True, text=True)
+        self.assertEqual(stopped.returncode, 0, stopped.stderr)
+        self.assertFalse(lock.exists())
 
     def test_legacy_files_are_never_rewritten_or_reinterpreted(self):
         (self.root / "logs").mkdir()

@@ -3,6 +3,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+import subprocess
 import threading
 from unittest.mock import patch
 
@@ -14,6 +15,20 @@ from center_runtime import CenterRuntime
 from center_server import CenterServer
 from runtime_artifacts import base_record, save
 from cycle_reports import write_report
+import center_profiles
+
+
+class BrowserAdapter(FakeAdapter):
+    def query(self, action, **kwargs):
+        if action == 'dependencies':
+            config = center_profiles.validate({'engine': kwargs['engine'], 'model': kwargs['model'],
+                                               'effort': kwargs['effort'], 'productLanguage': kwargs['product_language']})
+            ready = config['model'] != 'fixture-missing-dependency'
+            return {'ready': ready, 'checks': [{'name': 'fixture_dependencies', 'ok': ready,
+                    'message': 'Offline dependency fixture' if ready else 'Fixture engine dependency is unavailable', **config}]}
+        if action == 'query' and not (Path(kwargs['root']) / '.autonomous-company-center.json').exists():
+            return {'ok': True, 'context': {'valid': False, 'reason': 'read_only_source'}, 'compatible': False}
+        return super().query(action, **kwargs)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--cycles', type=int, choices=(6, 36), default=6)
@@ -44,7 +59,13 @@ try:
     preview.update(cycleId=None, state='running', lifetime='operator',
                    url='http://127.0.0.1:12345/', token='a' * 32)
     save(case.root, preview)
-    runtime = CenterRuntime(case.store, case.catalog, ROOT, {'platform': 'posix'}, adapter=FakeAdapter())
+    framework = case.base / 'framework'
+    framework.mkdir()
+    (framework / 'PROMPT.md').write_text('Offline browser preparation fixture.\n', encoding='utf-8')
+    for command in (['git', 'init', str(framework)], ['git', '-C', str(framework), 'add', '.'],
+                    ['git', '-C', str(framework), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'fixture']):
+        subprocess.run(command, check=True, capture_output=True)
+    runtime = CenterRuntime(case.store, case.catalog, framework, {'platform': 'posix'}, adapter=BrowserAdapter())
     with case.store.transaction() as tx:
         preferences = tx.get('preferences', 'main')
         preferences.update(language='en', productLanguage='en')
