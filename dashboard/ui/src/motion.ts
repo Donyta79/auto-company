@@ -69,14 +69,16 @@ export function reconcile(container: HTMLElement, nodes: Node[]) {
 
 function fluidNavigation(navigation: HTMLElement) {
   const { width, height } = navigation.getBoundingClientRect();
+  const inset = matchMedia('(max-width: 640px)').matches ? 0 : 12;
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   const path = document.createElementNS(svg.namespaceURI, 'path') as SVGPathElement;
   svg.classList.add('navigation-fluid-surface'); svg.setAttribute('aria-hidden', 'true');
-  svg.setAttribute('viewBox', `0 0 ${width + 24} ${height}`);
+  svg.style.left = `${-inset}px`; svg.style.width = `calc(100% + ${inset * 2}px)`;
+  svg.setAttribute('viewBox', `0 0 ${width + inset * 2} ${height}`);
   svg.setAttribute('preserveAspectRatio', 'none');
   // Matching path commands let Motion interpolate the crown and both concave feet together.
-  const outline = (top: number, crown: number, foot: number) => `M ${12 - foot} ${height} A ${foot} ${foot} 0 0 0 12 ${height - foot} L 12 ${top + crown} A ${crown} ${crown} 0 0 1 ${12 + crown} ${top} L ${width + 12 - crown} ${top} A ${crown} ${crown} 0 0 1 ${width + 12} ${top + crown} L ${width + 12} ${height - foot} A ${foot} ${foot} 0 0 0 ${width + 12 + foot} ${height} Z`;
-  const expanded = outline(0, 12, 12), collapsed = outline(height, 0, 0);
+  const outline = (top: number, crown: number, foot: number) => `M ${inset - foot} ${height} A ${foot} ${foot} 0 0 0 ${inset} ${height - foot} L ${inset} ${top + crown} A ${crown} ${crown} 0 0 1 ${inset + crown} ${top} L ${width + inset - crown} ${top} A ${crown} ${crown} 0 0 1 ${width + inset} ${top + crown} L ${width + inset} ${height - foot} A ${foot} ${foot} 0 0 0 ${width + inset + foot} ${height} Z`;
+  const expanded = outline(0, 12, inset), collapsed = outline(height, 0, 0);
   path.setAttribute('d', expanded); svg.append(path);
   const children = [...navigation.children] as HTMLElement[];
   navigation.append(svg); navigation.dataset.fluidNavigation = '';

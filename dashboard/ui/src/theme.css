@@ -475,7 +475,7 @@ button.project-info-trigger { position: fixed; top: calc(var(--overview-tab-top)
   .cycle-records .record-list { grid-template-columns: 12px max-content minmax(0, 1fr); gap: 12px 8px; }
   .record-list .record-row { row-gap: 4px; }
   .record-list .record-row > time { grid-column: 2; grid-row: 1; }
-  .record-list .record-title { grid-column: 3; grid-row: 1; white-space: nowrap; }
+  .record-list .record-title { grid-column: 3; grid-row: 1; white-space: normal; overflow-wrap: anywhere; }
   .record-list .record-detail { grid-column: 2 / -1; grid-row: 2; }
   .record-detail .artifact-link > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .record-list .record-row::before { grid-column: 1 / 2; bottom: -23px; }

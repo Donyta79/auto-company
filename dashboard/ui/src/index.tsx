@@ -353,21 +353,18 @@ function dockSidebar(compact: boolean, animated = true) {
   Object.assign(sidebar.style, { position: 'absolute', right: '0', top: '0', width: '360px', margin: '0', ...(compact ? sidebarMotion.enter : sidebarMotion.exit) });
   portal.append(sidebar);
   portal.style.minHeight = `${sidebar.offsetHeight}px`;
-  grid.style.gridTemplateColumns = wasCompact ? 'minmax(0px, 1fr) 0px' : 'minmax(0px, 1fr) 360px';
-  grid.style.columnGap = wasCompact ? '0px' : '22px';
-  Object.assign(trigger.style, { display: 'inline-flex', transform: compact ? 'translateX(24px)' : 'translateX(0)', opacity: compact ? '0' : '1' });
+  // Apply the new grid immediately so a narrow viewport never reserves the old sidebar width.
+  Object.assign(trigger.style, { display: 'inline-flex', opacity: compact ? '0' : '1' });
   const finish = () => {
     if (finishSidebarDock !== finish) return;
     finishSidebarDock = null;
-    [sidebar, grid, trigger].forEach(stopMotion);
+    [sidebar, trigger].forEach(stopMotion);
     destination.append(sidebar); portal.remove();
     for (const property of ['position', 'right', 'top', 'width', 'margin', 'transform', 'opacity']) sidebar.style.removeProperty(property);
-    grid.style.removeProperty('grid-template-columns'); grid.style.removeProperty('column-gap');
     for (const property of ['display', 'transform', 'opacity']) trigger.style.removeProperty(property);
   };
   finishSidebarDock = finish;
-  tween(grid, { gridTemplateColumns: compact ? 'minmax(0px, 1fr) 0px' : 'minmax(0px, 1fr) 360px', columnGap: compact ? '0px' : '22px' }, timing.page, undefined, true);
-  tween(trigger, { transform: compact ? 'translateX(0)' : 'translateX(24px)', opacity: compact ? '1' : '0' }, timing.page, undefined, true);
+  tween(trigger, { opacity: compact ? '1' : '0' }, timing.page, undefined, true);
   tween(sidebar, compact ? sidebarMotion.exit : sidebarMotion.enter, sidebarMotion.duration, finish, true);
 }
 closers.push(() => finishSidebarDock?.());

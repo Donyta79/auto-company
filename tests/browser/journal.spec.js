@@ -169,11 +169,26 @@ test('compact product information overlays the journal and restores the desktop 
   await expect(page.locator('[role=dialog]')).toHaveCount(0);
   await expect(page.locator('#projectSidebarHome #projectSidebar')).toBeVisible();
   await expect(page.locator('#projectInfoButton')).toBeHidden();
-  for (const width of [761, 760, 641, 640, 390]) {
+  await page.evaluate(() => {
+    window.__resizeOverflow = [];
+    const sample = () => {
+      window.__resizeOverflow.push(document.documentElement.scrollWidth - innerWidth);
+      window.__resizeFrame = requestAnimationFrame(sample);
+    };
+    window.__resizeFrame = requestAnimationFrame(sample);
+  });
+  for (const width of [360, 1440, 761, 760, 641, 640, 390]) {
     await page.setViewportSize({ width, height: 800 });
     const inset = await page.locator('.topbar').evaluate(node => node.querySelector('.brand').getBoundingClientRect().top - node.getBoundingClientRect().top);
     expect(inset).toBeCloseTo(12, 1);
   }
+  await expect(page.locator('.sidebar-dock-motion')).toHaveCount(0);
+  const overflow = await page.evaluate(() => {
+    cancelAnimationFrame(window.__resizeFrame);
+    return window.__resizeOverflow;
+  });
+  expect(overflow.length).toBeGreaterThan(0);
+  expect(Math.max(...overflow)).toBeLessThanOrEqual(0);
 });
 
 test('spec compliance: disconnected logs preserve reading position, copy and source time', async ({ page, journal }) => {
