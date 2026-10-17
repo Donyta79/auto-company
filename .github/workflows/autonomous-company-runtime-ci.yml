@@ -230,6 +230,9 @@ jobs:
       - name: Install Chromium
         working-directory: tests/browser
         run: python3 ../../scripts/ci/run.py chromium-install npx playwright install --with-deps chromium
+      - name: Install product screenshot Chromium
+        working-directory: scripts/media
+        run: python3 ../../scripts/ci/run.py media-chromium-install npx playwright install --with-deps chromium
       - name: Test Dashboard with a real browser and isolated server
         run: python3 scripts/ci/run.py dashboard-browser npm test --prefix tests/browser
       - name: Set up Python for example core tests
@@ -261,6 +264,7 @@ jobs:
           path: |-
             ci-results/
             tests/browser/ci-results/
+            scripts/media/ci-results/
             tests/browser/test-results/
             tests/browser/playwright-report/
           retention-days: 14
