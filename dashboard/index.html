@@ -44,7 +44,6 @@
           <button id="tab-usage" class="tab" role="tab" aria-selected="false" aria-controls="panel-usage" tabindex="-1" data-tab="usage" data-i18n="usage">用量</button>
           <button id="tab-logs" class="tab" role="tab" aria-selected="false" aria-controls="panel-logs" tabindex="-1" data-tab="logs" data-i18n="logs">日志</button>
         </nav>
-        <a id="productInfoJump" class="product-info-jump" href="#projectSidebar" data-i18n="productInfo">产品信息</a>
       </div>
         <div class="workspace-tools">
           <button id="settingsButton" class="icon-button settings-trigger" type="button"><svg class="ui-icon" data-lucide="settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />  <circle cx="12" cy="12" r="3" /></svg><span class="sr-only" data-i18n="settings">设置</span></button>
@@ -60,6 +59,7 @@
         <p data-i18n="loading">正在读取工作记录…</p>
       </div>
       <section id="panel-work" class="workspace-panel" role="tabpanel" aria-labelledby="tab-work" hidden>
+        <button id="projectInfoButton" class="button project-info-trigger" type="button" aria-haspopup="dialog" aria-controls="projectInfoDrawer" aria-expanded="false"><span data-icon="chevron-right" aria-hidden="true"></span><span data-i18n="projectOverview">概况</span></button>
         <div class="journal-layout">
           <div class="current-column">
             <div id="currentCycle"></div>
@@ -71,11 +71,13 @@
             <div id="historyList"></div>
           </section>
           </div>
+          <div id="projectSidebarHome">
           <aside id="projectSidebar" class="project-sidebar" aria-label="项目概况" tabindex="-1">
             <div id="runtimeControls" class="runtime-controls" hidden>
               <button id="runtimeActionButton" class="button" type="button" disabled data-action="start" data-i18n="start">启动运行</button>
             </div>
           </aside>
+          </div>
 
         </div>
       </section>
@@ -145,6 +147,10 @@
         </details>
       </section>
     </main>
+    </div>
+    <div id="projectInfoDrawer" class="project-info-drawer" aria-labelledby="projectInfoTitle" hidden>
+      <h2 id="projectInfoTitle" class="sr-only" data-i18n="productInfo">产品信息</h2>
+      <div id="projectInfoDrawerBody" class="project-info-body"></div>
     </div>
     <dialog id="stopConfirmDialog" data-confirmation="true" aria-labelledby="stopConfirmTitle" aria-describedby="stopConfirmMessage">
       <div class="dialog-header"><h2 id="stopConfirmTitle" data-i18n="stopConfirmTitle">停止当前运行</h2><button id="closeStopConfirm" class="icon-button" data-safe-action data-i18n="close">关闭</button></div>

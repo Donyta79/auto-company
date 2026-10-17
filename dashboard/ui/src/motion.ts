@@ -2,20 +2,26 @@ import { animate } from "motion/mini";
 import { spring } from "motion";
 
 export const timing = { micro: 120, local: 180, layout: 220, drawer: 240, page: 300 };
+export const sidebarMotion = {
+  enter: { transform: 'translateX(0)', opacity: '1' },
+  exit: { transform: 'translateX(72px)', opacity: '0' },
+  duration: timing.page,
+};
 export const easing = "cubic-bezier(.2,.7,.2,1)";
 const running = new Set<() => void>();
+const resizeStable = new Set<() => void>();
 const preference = matchMedia("(prefers-reduced-motion: reduce)");
 export const quiet = () => preference.matches || document.hidden || Boolean((window as any).__disableDashboardMotion);
 
 // Motion owns interpolation and interrupted values; the app owns lifecycle completion.
 const scopes = new WeakMap<HTMLElement, () => void>();
-export function tween(node: HTMLElement, target: Record<string, string>, duration = timing.local, done?: () => void) {
+export function tween(node: HTMLElement, target: Record<string, string>, duration = timing.local, done?: () => void, preserveOnResize = false) {
   scopes.get(node)?.();
   if (quiet() || !node.animate) { Object.assign(node.style, target); done?.(); return; }
   let animation: ReturnType<typeof animate>;
   try { animation = animate(node, target, { duration: duration / 1000, ease: [.2, .7, .2, 1] }); }
   catch { Object.assign(node.style, target); done?.(); return; }
-  const release = () => { if (scopes.get(node) === stop) scopes.delete(node); running.delete(finish); };
+  const release = () => { if (scopes.get(node) === stop) scopes.delete(node); running.delete(finish); resizeStable.delete(finish); };
   const stop = () => {
     // Tabs may hide a node before cancellation; browsers cannot commit its styles then.
     try { animation.stop(); } catch { animation.cancel(); }
@@ -23,9 +29,11 @@ export function tween(node: HTMLElement, target: Record<string, string>, duratio
   };
   const finish = () => { stop(); Object.assign(node.style, target); done?.(); };
   scopes.set(node, stop); running.add(finish);
+  if (preserveOnResize) resizeStable.add(finish);
   animation.then(() => { if (scopes.get(node) === stop) { release(); done?.(); } });
   return animation;
 }
+export function stopMotion(node: HTMLElement) { scopes.get(node)?.(); }
 
 export function reveal(node: HTMLElement | null) {
   if (!node || quiet()) return;
@@ -61,14 +69,16 @@ export function reconcile(container: HTMLElement, nodes: Node[]) {
 
 function fluidNavigation(navigation: HTMLElement) {
   const { width, height } = navigation.getBoundingClientRect();
+  const inset = matchMedia('(max-width: 640px)').matches ? 0 : 12;
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   const path = document.createElementNS(svg.namespaceURI, 'path') as SVGPathElement;
   svg.classList.add('navigation-fluid-surface'); svg.setAttribute('aria-hidden', 'true');
-  svg.setAttribute('viewBox', `0 0 ${width + 24} ${height}`);
+  svg.style.left = `${-inset}px`; svg.style.width = `calc(100% + ${inset * 2}px)`;
+  svg.setAttribute('viewBox', `0 0 ${width + inset * 2} ${height}`);
   svg.setAttribute('preserveAspectRatio', 'none');
   // Matching path commands let Motion interpolate the crown and both concave feet together.
-  const outline = (top: number, crown: number, foot: number) => `M ${12 - foot} ${height} A ${foot} ${foot} 0 0 0 12 ${height - foot} L 12 ${top + crown} A ${crown} ${crown} 0 0 1 ${12 + crown} ${top} L ${width + 12 - crown} ${top} A ${crown} ${crown} 0 0 1 ${width + 12} ${top + crown} L ${width + 12} ${height - foot} A ${foot} ${foot} 0 0 0 ${width + 12 + foot} ${height} Z`;
-  const expanded = outline(0, 12, 12), collapsed = outline(height, 0, 0);
+  const outline = (top: number, crown: number, foot: number) => `M ${inset - foot} ${height} A ${foot} ${foot} 0 0 0 ${inset} ${height - foot} L ${inset} ${top + crown} A ${crown} ${crown} 0 0 1 ${inset + crown} ${top} L ${width + inset - crown} ${top} A ${crown} ${crown} 0 0 1 ${width + inset} ${top + crown} L ${width + inset} ${height - foot} A ${foot} ${foot} 0 0 0 ${width + inset + foot} ${height} Z`;
+  const expanded = outline(0, 12, inset), collapsed = outline(height, 0, 0);
   path.setAttribute('d', expanded); svg.append(path);
   const children = [...navigation.children] as HTMLElement[];
   navigation.append(svg); navigation.dataset.fluidNavigation = '';
@@ -110,7 +120,8 @@ export function workspace(root: HTMLElement, origin: DOMRect, done: () => void, 
   const finish = () => { if (finished) return; finished = true; clean(); if (direction < 0) reverseDone?.(); else entered(); };
   try {
     animations.push(surface.animate([{ transform: start }, { transform: 'translate(0,0) scale(1,1)' }], { duration: timing.page, easing, fill: 'both' }));
-    animations.push(main.animate([{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'translateY(0)' }], { duration: timing.page, easing, fill: 'both' }));
+    // Keep fixed descendants viewport-anchored and outgoing content at its reading position.
+    animations.push(main.animate([{ opacity: 0 }, { opacity: 1 }], { duration: timing.page, easing, fill: 'both' }));
   } catch { finish(); }
   const watch = () => { const currentDirection = direction; Promise.all([...animations.map(animation => animation.finished), ...(fluid?.controls.map(control => control.finished) || [])]).then(() => { if (direction === currentDirection) finish(); }, () => {}); };
   if (returning) animations.forEach(animation => { animation.currentTime = timing.page; animation.reverse(); });
@@ -127,15 +138,15 @@ export function workspace(root: HTMLElement, origin: DOMRect, done: () => void, 
     fluid?.controls.forEach(control => { control.speed = -1; control.play(); }); watch();
   } };
 }
-function finishAll() { [...running].forEach(finish => finish()); }
-preference.addEventListener('change', finishAll);
+function finishAll(resizing = false) { [...running].forEach(finish => { if (!resizing || !resizeStable.has(finish)) finish(); }); }
+preference.addEventListener('change', () => finishAll());
 document.addEventListener('visibilitychange', () => {
   document.documentElement.toggleAttribute('data-motion-hidden', document.hidden);
   if (document.hidden) finishAll();
 });
 let resizeRevision = 0;
 addEventListener('resize', () => {
-  finishAll(); const revision = ++resizeRevision; document.documentElement.dataset.motionResize = '';
+  finishAll(true); const revision = ++resizeRevision; document.documentElement.dataset.motionResize = '';
   requestAnimationFrame(() => requestAnimationFrame(() => { if (revision === resizeRevision) delete document.documentElement.dataset.motionResize; }));
 });
 (window as any).DashboardMotion = { workspace, tween, timing };

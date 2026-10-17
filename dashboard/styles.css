@@ -1823,7 +1823,6 @@ dialog .runtime-details {
 .screenshot-stale { color: var(--attention); }
 .project-runtime-status .progress-failed { color: var(--danger); }
 .project-runtime-status .progress-paused, .project-runtime-status .progress-unknown { color: var(--muted); }
-.product-info-jump { display: none; }
 .table-scroll, .log-text { max-width: 100%; min-width: 0; overscroll-behavior: contain; }
 .usage-summary { margin-block: 24px; }
 .usage-table th { background: var(--ui-surface); }
@@ -1840,7 +1839,6 @@ dialog .runtime-details {
 .disabled-reason { color: var(--muted); font-size: var(--text-caption); line-height: 1.5; overflow-wrap: anywhere; }
 @media (max-width: 760px) {
   .navline { flex-wrap: wrap; }
-  .product-info-jump { display: inline-flex; align-items: center; min-height: 44px; font-size: var(--text-caption); }
   .project-sidebar { scroll-margin-top: 16px; }
   .artifact-link > span { white-space: normal; overflow-wrap: anywhere; }
   .artifact-link { align-items: start; }

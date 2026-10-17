@@ -54,14 +54,18 @@ test("one sidebar control and right-aligned tabs stay clear of the brand at narr
     expect(bounds.brand.top).toBeGreaterThanOrEqual(bounds.header.top);
     expect(bounds.name.right).toBeLessThanOrEqual(bounds.button.left);
     expect(bounds.navigation.right - bounds.tabs.right).toBeLessThanOrEqual(20);
-    const inset = width <= 760 ? 4 : 8;
+    const inset = 8;
     expect(bounds.back.width).toBe(32);
     expect(bounds.back.height).toBe(32);
     expect(bounds.back.left - bounds.navigation.left).toBeCloseTo(inset, 1);
     expect(bounds.back.top - bounds.navigation.top).toBeCloseTo(inset, 1);
     expect(bounds.arrow.left + bounds.arrow.width / 2).toBeCloseTo(bounds.back.left + 16, 1);
     expect(bounds.arrow.top + bounds.arrow.height / 2).toBeCloseTo(bounds.back.top + 16, 1);
-    if (width > 760) expect(bounds.title.right).toBeLessThanOrEqual(bounds.tabs.left);
+    expect(bounds.title.right).toBeLessThanOrEqual(bounds.tabs.left);
+    expect(bounds.back.right).toBeLessThanOrEqual(bounds.title.left);
+    expect(bounds.back.top + bounds.back.height / 2).toBeCloseTo(bounds.tabs.top + bounds.tabs.height / 2, 1);
+    if (width > 640) expect(bounds.navigation.top).toBeLessThan(bounds.brand.bottom);
+    if (width === 1280) expect(bounds.title.left + bounds.title.width / 2).toBeCloseTo(bounds.navigation.left + bounds.navigation.width / 2, 1);
     expect(bounds.overflow).toBe(false);
   }
 });

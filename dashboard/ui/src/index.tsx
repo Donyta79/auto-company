@@ -1,4 +1,4 @@
-import { tween, timing, quiet, reveal, positions, layout, reconcile } from "./motion";
+import { tween, timing, quiet, reveal, positions, layout, reconcile, stopMotion, sidebarMotion } from "./motion";
 import { Selection } from "./selection";
 import * as React from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -16,7 +16,7 @@ import { Skeleton } from "./components/ui/skeleton";
 import { Alert } from "./components/ui/alert";
 import { ChevronDown, EllipsisVertical } from "lucide-react";
 
-type ModalElement = HTMLElement & { showModal: () => void; close: () => void; open: boolean };
+type ModalElement = HTMLElement & { showModal: () => void; close: (instant?: boolean) => void; open: boolean };
 type MenuItem = { label: string; disabled?: boolean; reason?: string; danger?: boolean; action: () => void; focusKey?: string };
 type MenuProps = { id: string; label: string; items: MenuItem[] };
 function createDashboardUI(document: Document) {
@@ -29,11 +29,15 @@ const menus = new Map<string, { host: HTMLSpanElement; root: Root }>();
 // interaction; a stable DOM slot preserves those records when a portal opens.
 function installModal(original: HTMLElement, sheet = false) {
   const id = original.id;
+  const overview = id === 'projectInfoDrawer';
   const titleId = original.getAttribute("aria-labelledby") || undefined;
   const confirmation = id === "confirmDialog" || original.dataset.confirmation === "true";
   const host = document.createElement("span");
   host.dataset.uiRoot = sheet ? "sheet" : "dialog";
   document.body.append(host);
+  // The overview shares the page's clipping boundary, even above the journal.
+  const portalRoot = overview ? document.createElement('div') : document.body;
+  if (overview) { portalRoot.className = 'overview-portal'; document.body.append(portalRoot); }
   const root = ownRoot(host);
   let open = false;
   let returnFocus: HTMLElement | null = null;
@@ -47,7 +51,7 @@ function installModal(original: HTMLElement, sheet = false) {
     const visual = entrance.visual; entrance = null;
     const surface = node.parentElement!;
     const backdrop = surface.previousElementSibling as HTMLElement;
-    const target = sheet ? 'none' : 'translate(-50%,-50%)';
+    const target = overview ? sidebarMotion.enter.transform : sheet ? 'none' : 'translate(-50%,-50%)';
     surface.style.transition = 'none';
     if (visual) {
       surface.style.transform = target;
@@ -55,8 +59,8 @@ function installModal(original: HTMLElement, sheet = false) {
       const matrix = new DOMMatrix(getComputedStyle(surface).transform);
       matrix.e += visual.rect.left - box.left; matrix.f += visual.rect.top - box.top;
       Object.assign(surface.style, { opacity: visual.opacity, transform: matrix.toString() });
-    } else Object.assign(surface.style, { opacity: '0', transform: sheet ? 'translateX(100%)' : `${target} translateY(6px)` });
-    tween(surface, { opacity: '1', transform: target }, sheet ? timing.drawer : timing.local, () => { surface.style.removeProperty('opacity'); surface.style.removeProperty('transform'); });
+    } else Object.assign(surface.style, overview ? sidebarMotion.exit : { opacity: '0', transform: sheet ? 'translateX(100%)' : `${target} translateY(6px)` });
+    tween(surface, { opacity: '1', transform: target }, overview ? sidebarMotion.duration : sheet ? timing.drawer : timing.local, () => { surface.style.removeProperty('opacity'); surface.style.removeProperty('transform'); }, overview);
     if (backdrop?.matches('[data-slot$="overlay"]')) { backdrop.style.opacity = visual?.opacity || '0'; tween(backdrop, { opacity: '1' }, timing.local); }
   };
   original.dataset.dialogId = id;
@@ -74,7 +78,7 @@ function installModal(original: HTMLElement, sheet = false) {
     const liveOverlay = liveSurface?.previousElementSibling as HTMLElement | null;
     const previous = exiting?.surface || liveSurface;
     const visual = previous ? { opacity: getComputedStyle(previous).opacity, transform: getComputedStyle(previous).transform, rect: previous.getBoundingClientRect() } : null;
-    const anchor = liveSurface ? { left: getComputedStyle(liveSurface).left, top: getComputedStyle(liveSurface).top, width: getComputedStyle(liveSurface).width, height: getComputedStyle(liveSurface).height } : null;
+    const anchor = liveSurface ? { ...(overview ? { left: 'auto', right: getComputedStyle(liveSurface).right } : { left: getComputedStyle(liveSurface).left }), top: getComputedStyle(liveSurface).top, width: getComputedStyle(liveSurface).width, height: getComputedStyle(liveSurface).height } : null;
     const surface = !next && liveSurface ? liveSurface.cloneNode(false) as HTMLElement : null;
     const overlay = !next && liveOverlay?.matches('[data-slot$="overlay"]') ? liveOverlay.cloneNode(false) as HTMLElement : null;
     const exitSlot = !next && content ? content.cloneNode(false) as HTMLElement : null;
@@ -97,10 +101,10 @@ function installModal(original: HTMLElement, sheet = false) {
         // Releasing the modal scroll lock must not move the exit surface.
         surface.style.pointerEvents = 'none'; Object.assign(surface.style, anchor, { opacity: visual.opacity, transform: visual.transform });
         surface.removeAttribute('role'); surface.dataset.state = 'closed';
-        if (overlay) { overlay.style.pointerEvents = 'none'; overlay.style.opacity = overlayOpacity; overlay.setAttribute('aria-hidden', 'true'); document.body.append(overlay); }
-        document.body.append(surface); exiting = { surface, slot: exitSlot, overlay }; bind(exitSlot);
-        tween(surface, { opacity: '0', transform: sheet ? 'translateX(100%)' : 'translate(-50%,-50%) translateY(6px)' }, sheet ? timing.drawer : timing.local,
-          () => { if (token === revision) parkExit(); });
+        if (overlay) { overlay.style.pointerEvents = 'none'; overlay.style.opacity = overlayOpacity; overlay.setAttribute('aria-hidden', 'true'); portalRoot.append(overlay); }
+        portalRoot.append(surface); exiting = { surface, slot: exitSlot, overlay }; bind(exitSlot);
+        tween(surface, overview ? sidebarMotion.exit : { opacity: '0', transform: sheet ? 'translateX(100%)' : 'translate(-50%,-50%) translateY(6px)' }, overview ? sidebarMotion.duration : sheet ? timing.drawer : timing.local,
+          () => { if (token === revision) parkExit(); }, overview);
         if (overlay) tween(overlay, { opacity: '0' }, timing.local);
       }
       original.dispatchEvent(new Event("close"));
@@ -123,7 +127,7 @@ function installModal(original: HTMLElement, sheet = false) {
   const bind = (node: HTMLElement) => {
     Object.defineProperty(node, "open", { configurable: true, get: () => open });
     (node as ModalElement).showModal = () => change(true);
-    (node as ModalElement).close = () => change(false);
+    (node as ModalElement).close = (instant = false) => change(false, instant);
   };
   function render() {
     const common = {
@@ -132,7 +136,7 @@ function installModal(original: HTMLElement, sheet = false) {
       "aria-labelledby": titleId,
       "aria-describedby": undefined,
       showCloseButton: false,
-      container: document.body,
+      container: portalRoot,
       onInteractOutside: (event: CustomEvent<{ originalEvent: Event }>) => {
         // Shell controls retain their DOM identity when moved into this portal.
         // Test containment against DOM, not their original React ancestry.
@@ -146,7 +150,7 @@ function installModal(original: HTMLElement, sheet = false) {
           : id === "newWorkDialog" ? heading
           : content?.querySelector<HTMLElement>(sheet ? "button:not(:disabled)" : "input:not([type=radio]):not(:disabled), textarea:not(:disabled), select:not(:disabled), button:not(:disabled)");
         if (target === heading && heading) heading.tabIndex = -1;
-        (target || content)?.focus();
+        (target || content)?.focus({ preventScroll: true });
       },
       onCloseAutoFocus: (event: Event) => {
         event.preventDefault();
@@ -328,7 +332,44 @@ function installTabs() {
 }
 function selectTab(value: string) { updateTab?.(value); }
 
-const api = { element, mountControls: (scope: ParentNode = document.body) => mountControls(scope), notify, loading, groupTabs, reveal, positions, layout, reconcile,
+let finishSidebarDock: (() => void) | null = null;
+function dockSidebar(compact: boolean, animated = true) {
+  finishSidebarDock?.();
+  const sidebar = document.getElementById('projectSidebar')!;
+  const home = document.getElementById('projectSidebarHome')!;
+  const storage = document.getElementById('projectInfoDrawerBody')!;
+  const trigger = document.getElementById('projectInfoButton')!;
+  const grid = home.parentElement!;
+  const wasCompact = grid.hasAttribute('data-sidebar-compact');
+  grid.toggleAttribute('data-sidebar-compact', compact);
+  const destination = compact ? storage : home;
+  if (!animated || quiet() || !grid.getBoundingClientRect().width || wasCompact === compact) { destination.append(sidebar); return; }
+
+  // Move the actual card through a clipped visual layer; never duplicate records or controls.
+  const portal = document.createElement('div');
+  portal.className = 'sidebar-dock-motion'; portal.inert = true; portal.setAttribute('aria-hidden', 'true');
+  // Keep the right edge attached to the live grid throughout continuous resizing.
+  grid.append(portal);
+  Object.assign(sidebar.style, { position: 'absolute', right: '0', top: '0', width: '360px', margin: '0', ...(compact ? sidebarMotion.enter : sidebarMotion.exit) });
+  portal.append(sidebar);
+  portal.style.minHeight = `${sidebar.offsetHeight}px`;
+  // Apply the new grid immediately so a narrow viewport never reserves the old sidebar width.
+  Object.assign(trigger.style, { display: 'inline-flex', opacity: compact ? '0' : '1' });
+  const finish = () => {
+    if (finishSidebarDock !== finish) return;
+    finishSidebarDock = null;
+    [sidebar, trigger].forEach(stopMotion);
+    destination.append(sidebar); portal.remove();
+    for (const property of ['position', 'right', 'top', 'width', 'margin', 'transform', 'opacity']) sidebar.style.removeProperty(property);
+    for (const property of ['display', 'transform', 'opacity']) trigger.style.removeProperty(property);
+  };
+  finishSidebarDock = finish;
+  tween(trigger, { opacity: compact ? '1' : '0' }, timing.page, undefined, true);
+  tween(sidebar, compact ? sidebarMotion.exit : sidebarMotion.enter, sidebarMotion.duration, finish, true);
+}
+closers.push(() => finishSidebarDock?.());
+
+const api = { element, mountControls: (scope: ParentNode = document.body) => mountControls(scope), notify, loading, groupTabs, reveal, positions, layout, reconcile, dockSidebar,
   productSwitcher: (entries: Parameters<typeof productSwitcher>[0], current: string, labels: Parameters<typeof productSwitcher>[2], reset = false) => productSwitcher(entries, current, labels, reset, document.body), alertMessage, menu, retainMenus, selectTab, selectFilter,
   pause() { closers.forEach(close => close()); document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); },
   dispose() { closers.forEach(close => close()); retainMenus([]); disposeControls(document.body); roots.reverse().forEach(root => root.unmount()); },
@@ -340,6 +381,8 @@ productSwitcher([], "", { search: "", empty: "", current: "" }, false, document.
 document.querySelectorAll<HTMLElement>("dialog").forEach(node => installModal(node));
 const queue = document.getElementById("queueDrawer");
 if (queue) installModal(queue, true);
+const projectInfo = document.getElementById("projectInfoDrawer");
+if (projectInfo) installModal(projectInfo, true);
 document.documentElement.dataset.ui = "shadcn";
 return api;
 }
