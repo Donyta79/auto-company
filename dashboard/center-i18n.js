@@ -1,5 +1,6 @@
 window.CENTER_MESSAGES = {
   "zh-CN": {
+    helpDocuments: "帮助文档", docsReadme: "使用说明 ↗", docsSetup: "安装与配置 ↗", docsTroubleshooting: "故障排查 ↗", docsLanguage: "语言设置说明 ↗",
     reviewProductLock: "核对遗留目录锁",
     "back": "返回",
     "confirmCancelRequest": "确认取消请求",
@@ -67,7 +68,7 @@ window.CENTER_MESSAGES = {
     productPreview: "{name} · 产品预览", previewPrevious: "{name} · 上一版本实拍",
     round_completed: "已完成", round_running: "进行中", round_interrupted: "已中断", round_completed_with_timeout: "超时结束", round_pending: "待开始", round_not_started: "尚未开始", round_startup_unconfirmed: "启动待确认",
     capacityRunning: "运行中", capacityWaiting: "等待中", capacityLimit: "并发上限", capacitySummary: "{running} 个项目运行中 · {queued} 个等待 · 并发上限 {capacity}", runtimeUnconfirmed: "暂时无法读取运行状态，请刷新重试",
-    skip: "跳至产品列表", primaryNav: "主导航", products: "产品中心", queue: "工作队列", settings: "设置",
+    skip: "跳至产品列表", primaryNav: "主导航", products: "产品中心", queue: "工作队列", settings: "设置", appearance: "外观", themeSystem: "跟随系统（默认）", themeLight: "浅色", themeDark: "深色", themeHint: "跟随浏览器或电脑的深浅设置，也可手动选择。",
     workspace: "本机产品中心", subtitle: "查看产品进展与成果", importAction: "接入", importProduct: "接入已有产品", newWork: "新建工作",
     currentWork: "当前工作", noCurrentWork: "当前没有正在执行的工作", viewWork: "查看工作记录", productList: "产品列表",
     searchProducts: "搜索产品", filterProducts: "筛选产品", filterAll: "全部", filterRunning: "正在工作", filterQueued: "已排队",
@@ -117,6 +118,7 @@ window.CENTER_MESSAGES = {
     sourceList: "已登记来源", sourceNumber: "来源 {number}", currentSource: "当前来源", sourceProject: "项目 {project}", sourceProjectLabel: "项目", sourceIdShort: "ID …{id}", sourceDetails: "来源详情", sourceLocation: "登记位置", sourceIdentifier: "来源 ID", sourceLastVerified: "最近核验", selectSource: "设为当前来源", reconnectSource: "重新连接目录", reconnectPath: "新的本机目录", reconnectHint: "先只读检查新目录，身份与已有记录一致后再连接。", takeover: "由中心接管", release: "解除中心接管", previewStart: "启动预览", previewStop: "停止预览", captureMedia: "更新产品媒体", detachEntry: "从中心移除", sourceSelected: "当前来源已更新。", sourceReconnected: "来源已重新连接。", managementComplete: "操作已完成。", operationAttention: "操作需要处理：{reason}", selectCurrentFirst: "请先把该来源设为当前来源。", noSources: "没有可用来源。", registeredDocuments: "登记文档", unmanagedSource: "尚未由产品中心管理", sourceUnavailableReason: "来源当前不可用", releaseFirst: "请先解除中心接管。", operationInProgress: "操作进行中…", queuePausedOnRestart: "中心重启后队列默认暂停。"
   },
   en: {
+    helpDocuments: "Help documents", docsReadme: "User guide ↗", docsSetup: "Setup and configuration ↗", docsTroubleshooting: "Troubleshooting ↗", docsLanguage: "Language settings ↗",
     reviewProductLock: "Review abandoned directory lock",
     "back": "Back",
     "confirmCancelRequest": "Confirm cancellation",
@@ -184,7 +186,7 @@ window.CENTER_MESSAGES = {
     productPreview: "{name} · Product preview", previewPrevious: "{name} · Previous version capture",
     round_completed: "Completed", round_running: "In progress", round_interrupted: "Interrupted", round_completed_with_timeout: "Timed out", round_pending: "Pending", round_not_started: "Not started", round_startup_unconfirmed: "Startup unconfirmed",
     capacityRunning: "Running", capacityWaiting: "Waiting", capacityLimit: "Concurrency", capacitySummary: "{running} running · {queued} waiting · Concurrency {capacity}", runtimeUnconfirmed: "Runtime status unconfirmed",
-    skip: "Skip to products", primaryNav: "Primary navigation", products: "Products", queue: "Work queue", settings: "Settings",
+    skip: "Skip to products", primaryNav: "Primary navigation", products: "Products", queue: "Work queue", settings: "Settings", appearance: "Appearance", themeSystem: "Follow system (default)", themeLight: "Light", themeDark: "Dark", themeHint: "Follow your browser or computer theme, or choose manually.",
     workspace: "Local product center", subtitle: "Review product progress and outcomes", importAction: "Connect", importProduct: "Connect product", newWork: "New work",
     currentWork: "Current work", noCurrentWork: "No work is currently running", viewWork: "View work journal", productList: "Product list",
     searchProducts: "Search products", filterProducts: "Filter products", filterAll: "All", filterRunning: "Working", filterQueued: "Queued",
